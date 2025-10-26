@@ -108,6 +108,7 @@ impl MSEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeqOpenReq {
     pub model: String,
+
     #[serde(default)]
     pub tools_enabled: bool,
 

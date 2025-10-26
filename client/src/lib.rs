@@ -1,27 +1,16 @@
-use futures_util::{
-    stream::{SplitSink, SplitStream},
-    SinkExt, StreamExt,
-};
-use http::{Request, Uri};
-use modelsocket_common::{MSEvent, MSRequest, SeqGenReq, SeqOpenReq};
-use std::{collections::HashMap, sync::Arc};
-use thiserror::Error;
-use tokio::{
-    net::TcpStream,
-    sync::{mpsc, Mutex},
-};
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{self, protocol::Message, Error as WsError},
-    MaybeTlsStream, WebSocketStream,
-};
+mod seq;
+pub mod transport;
 
+use futures::{Sink, Stream};
+use futures_util::{SinkExt, StreamExt};
+use modelsocket_common::{MSEvent, MSRequest, SeqGenReq, SeqOpenReq};
+pub use seq::{GenChunk, GenStream, Seq};
+use std::{collections::HashMap, pin::Pin, sync::Arc};
+use thiserror::Error;
+use tokio::sync::{mpsc, Mutex};
+use tokio_tungstenite::tungstenite::{protocol::Message, Error as WsError};
 use tracing::{debug, error};
 use uuid::Uuid;
-
-mod seq;
-
-pub use seq::{GenChunk, GenStream, Seq};
 
 #[derive(Error, Debug)]
 pub enum ModelSocketError {
@@ -43,45 +32,24 @@ pub enum ModelSocketError {
     Command(String),
 }
 
-type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
-type WsStream = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
-
 #[derive(Clone)]
 pub struct ModelSocket {
-    ws_sink: Arc<Mutex<WsSink>>,
+    ws_sink: Arc<Mutex<Pin<Box<dyn Sink<MSRequest, Error = ModelSocketError> + Send>>>>,
     opening_seqs: Arc<Mutex<HashMap<String, mpsc::Sender<Result<String, ModelSocketError>>>>>,
     seqs: Arc<Mutex<HashMap<String, Seq>>>,
 }
 
 impl ModelSocket {
-    pub async fn connect(url: &str, api_key: Option<&str>) -> Result<Self, ModelSocketError> {
-        let uri: Uri = url.parse().unwrap();
-
-        let mut request_builder = Request::builder().uri(&uri);
-
-        request_builder = request_builder
-            .header(
-                "Sec-WebSocket-Key",
-                tungstenite::handshake::client::generate_key(),
-            )
-            .header("host", uri.host().unwrap())
-            .header("upgrade", "websocket")
-            .header("connection", "upgrade")
-            .header("sec-websocket-version", 13);
-
-        if let Some(key) = api_key {
-            request_builder = request_builder.header("Authorization", format!("Bearer {key}"));
-        }
-
-        let request = request_builder
-            .body(())
-            .map_err(|e| ModelSocketError::Protocol(e.to_string()))?;
-
-        let (ws_stream, _) = connect_async(request).await?;
-        let (ws_sink, ws_stream) = ws_stream.split();
+    pub fn new<RX, TX, T>(transport: T) -> Result<Self, ModelSocketError>
+    where
+        RX: Stream<Item = Result<MSEvent, ModelSocketError>> + Send + Unpin + 'static,
+        TX: Sink<MSRequest, Error = ModelSocketError> + Send + 'static,
+        T: transport::MSTransport<RX, TX>,
+    {
+        let (ws_sink, ws_stream) = transport.split();
 
         let socket = Self {
-            ws_sink: Arc::new(Mutex::new(ws_sink)),
+            ws_sink: Arc::new(Mutex::new(Box::pin(ws_sink))),
             opening_seqs: Arc::new(Mutex::new(HashMap::new())),
             seqs: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -95,6 +63,11 @@ impl ModelSocket {
         Ok(socket)
     }
 
+    pub async fn connect(url: &str, api_key: Option<&str>) -> Result<Self, ModelSocketError> {
+        let ws_transport = transport::ws::WebSocketTransport::connect(url, api_key).await?;
+        Self::new(ws_transport)
+    }
+
     fn clone_components(&self) -> Self {
         Self {
             ws_sink: self.ws_sink.clone(),
@@ -103,33 +76,27 @@ impl ModelSocket {
         }
     }
 
-    async fn read_loop(self, mut ws_stream: WsStream) {
-        while let Some(msg) = ws_stream.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    debug!("<- {}", text);
-                    self.on_message(&text).await;
-                }
-                Ok(_) => { /* Ignore other message types */ }
-                Err(e) => {
-                    error!("WebSocket read error: {}", e);
+    async fn read_loop<S: Stream<Item = Result<MSEvent, ModelSocketError>> + Unpin>(
+        self,
+        mut events: S,
+    ) {
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(event) => self.on_event(event).await,
+                Err(err) => {
+                    error!("ms error: {}", err);
                     break;
                 }
             }
         }
     }
 
-    async fn on_message(&self, msg: &str) {
-        match serde_json::from_str::<MSEvent>(msg) {
-            Ok(event) => match event {
-                MSEvent::SeqOpened { seq_id, cid } => self.on_seq_opened(seq_id, cid).await,
-                MSEvent::Error { cid, message, .. } => self.on_error(cid, message).await,
-                MSEvent::SeqClosed { cid, seq_id, .. } => self.on_seq_closed(cid, seq_id).await,
-                _ => self.forward_to_seq(&event).await,
-            },
-            Err(e) => {
-                error!("deserialization error: {}", e);
-            }
+    async fn on_event(&self, event: MSEvent) {
+        match event {
+            MSEvent::SeqOpened { seq_id, cid } => self.on_seq_opened(seq_id, cid).await,
+            MSEvent::Error { cid, message, .. } => self.on_error(cid, message).await,
+            MSEvent::SeqClosed { cid, seq_id, .. } => self.on_seq_closed(cid, seq_id).await,
+            _ => self.forward_to_seq(&event).await,
         }
     }
 
@@ -158,6 +125,7 @@ impl ModelSocket {
 
     async fn on_error(&self, cid: Option<String>, message: String) {
         error!("error: {}", message);
+
         if let Some(cid) = cid {
             if let Some(sender) = self.opening_seqs.lock().await.remove(&cid) {
                 let _ = sender
@@ -171,9 +139,8 @@ impl ModelSocket {
     }
 
     async fn on_seq_closed(&self, _cid: Option<String>, seq_id: String) {
-        if let Some(_seq) = self.seqs.lock().await.remove(&seq_id) {
-            // This part will be completed in the next steps
-            // seq.on_close().await;
+        if let Some(seq) = self.seqs.lock().await.remove(&seq_id) {
+            drop(seq);
         } else {
             error!("state error: unknown seq_id {}", seq_id);
         }
@@ -227,10 +194,9 @@ impl ModelSocket {
     }
 
     async fn send(&self, req: MSRequest) -> Result<(), ModelSocketError> {
-        let msg = serde_json::to_string(&req)?;
-        debug!("-> {}", msg);
+        debug!("-> {:?}", req);
         let mut sink = self.ws_sink.lock().await;
-        sink.send(Message::Text(msg)).await?;
+        sink.send(req).await?;
         Ok(())
     }
 }
