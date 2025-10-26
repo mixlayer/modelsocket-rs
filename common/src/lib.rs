@@ -62,7 +62,7 @@ pub enum MSEvent {
         hidden: bool,
         num_input_tokens: u32,
         num_output_tokens: u32,
-        tokens: Option<Vec<u64>>,
+        tokens: Option<Vec<u32>>,
     },
     SeqToolCall {
         seq_id: String,
@@ -79,6 +79,7 @@ pub enum MSEvent {
         input_tokens: u32,
         output_tokens: u32,
         duration_ms: u64,
+        error: Option<String>,
     },
     Error {
         #[serde(skip_serializing_if = "Option::is_none")]
