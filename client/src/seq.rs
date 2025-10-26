@@ -61,7 +61,7 @@ impl Seq {
         }
     }
 
-    async fn on_text(&mut self, cid: &str, text: String, hidden: bool, tokens: Option<Vec<u64>>) {
+    async fn on_text(&mut self, cid: &str, text: String, hidden: bool, tokens: Option<Vec<u32>>) {
         let mut gen_streams = self.gen_streams.lock().await;
         if let Some(sender) = gen_streams.get_mut(cid) {
             let chunk = GenChunk {
@@ -239,7 +239,7 @@ impl GenStream {
         Ok(result)
     }
 
-    pub async fn text_and_tokens(mut self) -> Result<(String, Vec<u64>), ModelSocketError> {
+    pub async fn text_and_tokens(mut self) -> Result<(String, Vec<u32>), ModelSocketError> {
         let mut text = String::new();
         let mut tokens = Vec::new();
         while let Some(chunk) = self.stream.recv().await {
@@ -258,5 +258,5 @@ impl GenStream {
 pub struct GenChunk {
     pub text: String,
     pub hidden: bool,
-    pub tokens: Option<Vec<u64>>,
+    pub tokens: Option<Vec<u32>>,
 }
