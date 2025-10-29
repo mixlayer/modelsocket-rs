@@ -14,22 +14,32 @@ use uuid::Uuid;
 
 #[derive(Error, Debug)]
 pub enum ModelSocketError {
-    #[error("WebSocket error: {0}")]
+    #[error("ws error: {0}")]
     WebSocket(#[from] WsError),
-    #[error("URL parsing error: {0}")]
+
+    #[error("invalid url: {0}")]
     Url(#[from] url::ParseError),
-    #[error("JSON serialization/deserialization error: {0}")]
+
+    #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("Protocol error: {0}")]
+
+    #[error("protocol error: {0}")]
     Protocol(String),
-    #[error("State error: {0}")]
+
+    #[error("state error: {0}")]
     State(String),
-    #[error("Open error: {0}")]
+
+    #[error("open error: {0}")]
     Open(String),
-    #[error("Send error: {0}")]
+
+    #[error("channel closed")]
     Send(#[from] mpsc::error::SendError<Message>),
-    #[error("Command error: {0}")]
+
+    #[error("command error: {0}")]
     Command(String),
+
+    #[error("other: {0}")]
+    Other(anyhow::Error),
 }
 
 #[derive(Clone)]
@@ -116,7 +126,6 @@ impl ModelSocket {
         let mut seqs = self.seqs.lock().await;
 
         if let Some(seq) = seqs.get_mut(seq_id) {
-            // This part will be completed in the next steps
             seq.on_event(event).await;
         } else {
             error!("state error: unknown seq_id {}", seq_id);
@@ -157,7 +166,7 @@ impl ModelSocket {
         }
     }
 
-    pub async fn open(&self, model: &str) -> Result<Seq, ModelSocketError> {
+    pub async fn open(&self, model: &str, opts: Option<OpenOpts>) -> Result<Seq, ModelSocketError> {
         let cid = Uuid::new_v4().to_string();
         let (tx, mut rx) = mpsc::channel(1);
 
@@ -166,13 +175,15 @@ impl ModelSocket {
             opening_seqs.insert(cid.clone(), tx);
         }
 
+        let opts = opts.unwrap_or_default();
+
         self.send(MSRequest::SeqOpen {
             cid: cid.clone(),
             data: SeqOpenReq {
                 model: model.to_string(),
-                tools_enabled: false,
-                tool_prompt: None,
-                skip_prelude: false,
+                tools_enabled: opts.tools_enabled,
+                tool_prompt: opts.tool_prompt,
+                skip_prelude: opts.skip_prelude,
             },
         })
         .await?;
@@ -183,7 +194,12 @@ impl ModelSocket {
             ))
         })?;
 
-        let seq = Seq::new(seq_id.clone(), model.to_string(), self.clone_components());
+        let seq = Seq::new(
+            seq_id.clone(),
+            model.to_string(),
+            self.clone_components(),
+            opts.event_sink,
+        );
 
         {
             let mut seqs = self.seqs.lock().await;
@@ -279,4 +295,21 @@ impl AppendOpts {
             role: Some("system".to_string()),
         }
     }
+}
+
+#[derive(Default, Debug)]
+pub struct OpenOpts {
+    /// Enable too use on the sequence. Will instruct the engine
+    /// to append tool instructions to the system prompt.
+    pub tools_enabled: bool,
+
+    /// Optional system prompt to use when tools are enabled
+    pub tool_prompt: Option<String>,
+
+    /// Skips system prompt prescribed by model authors
+    pub skip_prelude: bool,
+
+    /// Optional sink for listening to all events related
+    /// to this sequence
+    pub event_sink: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
 }

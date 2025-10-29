@@ -10,7 +10,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::sync::{mpsc, Mutex};
-use tracing::error;
+use tracing::{debug, error};
 use uuid::Uuid;
 
 use crate::{AppendOpts, ModelSocket, ModelSocketError};
@@ -22,20 +22,38 @@ pub struct Seq {
     socket: ModelSocket,
     cmds: Arc<Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, ModelSocketError>>>>>,
     gen_streams: Arc<Mutex<HashMap<String, mpsc::Sender<GenChunk>>>>,
+    event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
 }
 
 impl Seq {
-    pub(crate) fn new(seq_id: String, model: String, socket: ModelSocket) -> Self {
+    pub(crate) fn new(
+        seq_id: String,
+        model: String,
+        socket: ModelSocket,
+        event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
+    ) -> Self {
         Self {
             seq_id,
             model,
             socket,
             cmds: Arc::new(Mutex::new(HashMap::new())),
             gen_streams: Arc::new(Mutex::new(HashMap::new())),
+            event_tx,
         }
     }
 
+    pub fn id(&self) -> &str {
+        &self.seq_id
+    }
+
     pub async fn on_event(&mut self, event: &MSEvent) {
+        if let Some(tx) = &self.event_tx {
+            if let Err(_e) = tx.send(Ok(event.clone())).await {
+                debug!("seq event sink closed");
+                self.event_tx = None;
+            }
+        }
+
         match event {
             MSEvent::SeqAppendFinish { cid, .. } => self.on_append_finished(cid).await,
             MSEvent::SeqGenFinish { cid, .. } => self.on_gen_finished(cid).await,
@@ -97,6 +115,7 @@ impl Seq {
                 child_seq_id.to_string(),
                 self.model.clone(),
                 self.socket.clone(),
+                None,
             );
             self.socket
                 .seqs
@@ -107,6 +126,28 @@ impl Seq {
             let child_seq_json = serde_json::to_value(child_seq_id).unwrap();
             let _ = sender.send(Ok(child_seq_json)).await;
         }
+    }
+
+    /// A low-level method for sending raw commands over the ModelSocket connection.
+    /// You probably don't need this, use the higher-level methods like `append`, `generate`, `fork`, and `close`.
+    pub async fn send_cmd<S: AsRef<str>>(
+        &self,
+        cid: S,
+        cmd: SeqCommand,
+    ) -> Result<(), ModelSocketError> {
+        // TODO not sure if we need a return channel, maybe make it an optional arg?
+        // let (tx, mut rx) = mpsc::channel(1);
+        // self.cmds.lock().await.insert(cid.clone(), tx);
+
+        self.socket
+            .send(MSRequest::SeqCommand {
+                cid: cid.as_ref().to_string(),
+                seq_id: self.seq_id.clone(),
+                data: cmd,
+            })
+            .await?;
+
+        Ok(())
     }
 
     pub async fn append(
