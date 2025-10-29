@@ -22,7 +22,7 @@ pub struct Seq {
     socket: ModelSocket,
     cmds: Arc<Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, ModelSocketError>>>>>,
     gen_streams: Arc<Mutex<HashMap<String, mpsc::Sender<GenChunk>>>>,
-    event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
+    pub(crate) event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
 }
 
 impl Seq {
@@ -70,6 +70,9 @@ impl Seq {
                 self.on_text(cid, text.clone(), *hidden, tokens.clone())
                     .await
             }
+            MSEvent::SeqClosed { cid, .. } => {
+                self.on_close(cid).await;
+            }
             // MSEvent::SeqToolCall { cid, tool_calls, .. } => {
             //     self.on_tool_call(cid, tool_calls.clone()).await
             // }
@@ -77,6 +80,24 @@ impl Seq {
                 error!("unhandled event in seq: {:?}", event);
             }
         }
+    }
+
+    async fn on_close(&mut self, cid: &Option<String>) {
+        if let Some(cid) = cid {
+            if let Some(sender) = self.cmds.lock().await.remove(cid) {
+                let _ = sender.send(Ok(serde_json::Value::Null)).await;
+            }
+        }
+
+        // Clean up any resources associated with this seq
+        // TODO we probably want to send an Err frame to any pending commands/streams?
+        let mut cmds = self.cmds.lock().await;
+        cmds.clear();
+
+        let mut gen_streams = self.gen_streams.lock().await;
+        gen_streams.clear();
+
+        self.event_tx = None;
     }
 
     async fn on_text(&mut self, cid: &str, text: String, hidden: bool, tokens: Option<Vec<u32>>) {
@@ -87,6 +108,7 @@ impl Seq {
                 hidden,
                 tokens,
             };
+
             if sender.send(chunk).await.is_err() {
                 // Stream closed, remove it
                 gen_streams.remove(cid);
@@ -253,6 +275,7 @@ impl Seq {
         rx.recv()
             .await
             .ok_or_else(|| ModelSocketError::Command("failed to receive response".into()))??;
+
         Ok(())
     }
 }

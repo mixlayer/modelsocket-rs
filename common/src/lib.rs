@@ -104,6 +104,20 @@ impl MSEvent {
             _ => None,
         }
     }
+
+    pub fn seq_id(&self) -> Option<&str> {
+        match self {
+            MSEvent::SeqOpened { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqAppendFinish { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqGenFinish { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqForkFinish { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqText { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqToolCall { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqState { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqClosed { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::Error { seq_id, .. } => seq_id.as_ref().map(|s| s.as_str()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

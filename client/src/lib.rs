@@ -102,23 +102,23 @@ impl ModelSocket {
     }
 
     async fn on_event(&self, event: MSEvent) {
-        match event {
+        debug!("<- {:?}", event);
+        match &event {
             MSEvent::SeqOpened { seq_id, cid } => self.on_seq_opened(seq_id, cid).await,
             MSEvent::Error { cid, message, .. } => self.on_error(cid, message).await,
-            MSEvent::SeqClosed { cid, seq_id, .. } => self.on_seq_closed(cid, seq_id).await,
+            MSEvent::SeqClosed { seq_id, .. } => {
+                self.forward_to_seq(&event).await;
+                self.on_seq_closed(seq_id).await
+            }
             _ => self.forward_to_seq(&event).await,
         }
     }
 
     async fn forward_to_seq(&self, event: &MSEvent) {
-        let seq_id = match event {
-            MSEvent::SeqAppendFinish { seq_id, .. } => seq_id,
-            MSEvent::SeqGenFinish { seq_id, .. } => seq_id,
-            MSEvent::SeqForkFinish { seq_id, .. } => seq_id,
-            MSEvent::SeqText { seq_id, .. } => seq_id,
-            MSEvent::SeqToolCall { seq_id, .. } => seq_id,
-            _ => {
-                error!("unhandled event forwarded to seq: {:?}", event);
+        let seq_id = match event.seq_id() {
+            Some(id) => id,
+            None => {
+                error!("unroutable event forwarded to seq: {:?}", event);
                 return;
             }
         };
@@ -132,11 +132,11 @@ impl ModelSocket {
         }
     }
 
-    async fn on_error(&self, cid: Option<String>, message: String) {
+    async fn on_error(&self, cid: &Option<String>, message: &str) {
         error!("error: {}", message);
 
         if let Some(cid) = cid {
-            if let Some(sender) = self.opening_seqs.lock().await.remove(&cid) {
+            if let Some(sender) = self.opening_seqs.lock().await.remove(cid) {
                 let _ = sender
                     .send(Err(ModelSocketError::Open(format!(
                         "open error: {}",
@@ -147,18 +147,19 @@ impl ModelSocket {
         }
     }
 
-    async fn on_seq_closed(&self, _cid: Option<String>, seq_id: String) {
-        if let Some(seq) = self.seqs.lock().await.remove(&seq_id) {
+    async fn on_seq_closed(&self, seq_id: &str) {
+        if let Some(seq) = self.seqs.lock().await.remove(seq_id) {
+            debug!(seq = seq_id, "removing seq from client state");
             drop(seq);
         } else {
             error!("state error: unknown seq_id {}", seq_id);
         }
     }
 
-    async fn on_seq_opened(&self, seq_id: String, cid: String) {
+    async fn on_seq_opened(&self, seq_id: &str, cid: &str) {
         let mut opening_seqs = self.opening_seqs.lock().await;
-        if let Some(sender) = opening_seqs.remove(&cid) {
-            if let Err(e) = sender.send(Ok(seq_id)).await {
+        if let Some(sender) = opening_seqs.remove(cid) {
+            if let Err(e) = sender.send(Ok(seq_id.to_owned())).await {
                 error!("Failed to send seq_id: {}", e);
             }
         } else {
@@ -198,12 +199,15 @@ impl ModelSocket {
             seq_id.clone(),
             model.to_string(),
             self.clone_components(),
-            opts.event_sink,
+            None,
         );
 
         {
             let mut seqs = self.seqs.lock().await;
-            seqs.insert(seq_id, seq.clone());
+            let mut seq_event_handler = seq.clone();
+            seq_event_handler.event_tx = opts.event_sink;
+
+            seqs.insert(seq_id, seq_event_handler);
         }
 
         Ok(seq)
