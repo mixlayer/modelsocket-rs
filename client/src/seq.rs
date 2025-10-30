@@ -10,7 +10,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, error};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::{AppendOpts, ModelSocket, ModelSocketError};
@@ -77,7 +77,7 @@ impl Seq {
             //     self.on_tool_call(cid, tool_calls.clone()).await
             // }
             _ => {
-                error!("unhandled event in seq: {:?}", event);
+                warn!("unhandled event in seq: {:?}", event);
             }
         }
     }
