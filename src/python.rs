@@ -36,12 +36,12 @@ where
 }
 
 #[pyclass(name = "BlockingModelSocketClient", module = "modelsocket")]
-pub struct BlockingModelSocketClient {
+pub struct PyBlockingModelSocketClient {
     inner: ModelSocket,
 }
 
 #[pymethods]
-impl BlockingModelSocketClient {
+impl PyBlockingModelSocketClient {
     #[classmethod]
     #[pyo3(
         name = "connect",
@@ -64,7 +64,7 @@ impl BlockingModelSocketClient {
         tools_enabled: Option<bool>,
         tool_prompt: Option<&str>,
         skip_prelude: Option<bool>,
-    ) -> PyResult<BlockingSequence> {
+    ) -> PyResult<PyBlockingSeq> {
         let client = self.inner.clone();
 
         let seq = Python::with_gil(|py| {
@@ -77,17 +77,17 @@ impl BlockingModelSocketClient {
             })
         })?;
 
-        Ok(BlockingSequence { inner: seq })
+        Ok(PyBlockingSeq { inner: seq })
     }
 }
 
-#[pyclass(name = "BlockingSequence", module = "modelsocket")]
-pub struct BlockingSequence {
+#[pyclass(name = "BlockingSeq", module = "modelsocket")]
+pub struct PyBlockingSeq {
     inner: Seq,
 }
 
 #[pymethods]
-impl BlockingSequence {
+impl PyBlockingSeq {
     #[pyo3(text_signature = "($self, text, /, *, role=None)", signature = (text, role=None))]
     pub fn append(&self, text: &str, role: Option<&str>) -> PyResult<()> {
         let seq = self.inner.clone();
@@ -115,7 +115,7 @@ impl BlockingSequence {
             seed=None
         )
     )]
-    pub fn generate_text(
+    pub fn gen_text(
         &self,
         role: Option<&str>,
         stop_strings: Option<Vec<String>>,
@@ -165,7 +165,7 @@ impl BlockingSequence {
             seed=None
         )
     )]
-    pub fn generate_text_and_tokens(
+    pub fn gen_text_and_tokens(
         &self,
         role: Option<&str>,
         stop_strings: Option<Vec<String>>,
@@ -207,12 +207,12 @@ impl BlockingSequence {
     }
 
     #[pyo3(text_signature = "($self)")]
-    pub fn fork(&self) -> PyResult<BlockingSequence> {
+    pub fn fork(&self) -> PyResult<PyBlockingSeq> {
         let seq = self.inner.clone();
 
         let child = Python::with_gil(|py| block_on(py, async move { seq.fork().await }))?;
 
-        Ok(BlockingSequence { inner: child })
+        Ok(PyBlockingSeq { inner: child })
     }
 }
 
@@ -244,7 +244,7 @@ fn build_gen_opts(
 
 #[pymodule]
 fn modelsocket(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<BlockingModelSocketClient>()?;
-    m.add_class::<BlockingSequence>()?;
+    m.add_class::<PyBlockingModelSocketClient>()?;
+    m.add_class::<PyBlockingSeq>()?;
     Ok(())
 }

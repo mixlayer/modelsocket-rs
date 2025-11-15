@@ -1,6 +1,6 @@
 # modelsocket.rs
 
-Modelsocket.rs provides a Rust client and protocol types for talking to [Modelsocket](https://modelsocket.com/) model hosting endpoints.  It exposes a WebSocket based `ModelSocket` client for opening sequences, streaming generations, and coordinating multiple forks of a conversation.  The crate is designed so that consumers can either embed the client directly in Rust projects or build higher level integrations, such as Python bindings.
+Modelsocket.rs provides a Rust client and protocol types for talking to [Modelsocket](https://modelsocket.com/) model hosting endpoints. It exposes a WebSocket based `ModelSocket` client for opening sequences, streaming generations, and coordinating multiple forks of a conversation. The crate is designed so that consumers can either embed the client directly in Rust projects or build higher level integrations, such as Python bindings.
 
 ## Crate layout
 
@@ -12,9 +12,9 @@ Modelsocket.rs provides a Rust client and protocol types for talking to [Modelso
 
 The crate ships with two opt-in feature flags so it can be kept lightweight when only the protocol types are needed:
 
-| Feature  | Description |
-|----------|-------------|
-| `client` | Pulls in the asynchronous WebSocket client and its Tokio/futures dependencies. |
+| Feature  | Description                                                                                 |
+| -------- | ------------------------------------------------------------------------------------------- |
+| `client` | Pulls in the asynchronous WebSocket client and its Tokio/futures dependencies.              |
 | `python` | Builds the PyO3 powered blocking bindings. This automatically enables the `client` feature. |
 
 Enable the feature(s) you need when running Cargo commands, for example:
@@ -26,7 +26,7 @@ cargo test --features client
 
 ## Python bindings
 
-Enabling the `python` feature exposes a `modelsocket` extension module that wraps the Rust client in a "blocking" API.  The bindings reuse a shared single-threaded Tokio runtime under the hood so each call feels natural to synchronous Python code while still delegating the work to the async Rust implementation.
+Enabling the `python` feature exposes a `modelsocket` extension module that wraps the Rust client in a "blocking" API. The bindings reuse a shared single-threaded Tokio runtime under the hood so each call feels natural to synchronous Python code while still delegating the work to the async Rust implementation.
 
 ### Installing the bindings locally
 
@@ -43,29 +43,27 @@ The last command builds the extension module (`modelsocket`) in-place using the 
 
 ### Example
 
-Once the module is installed you can drive the blocking client just like the Rust version.  The snippet below opens a sequence, sends a user message, and prints the generated response:
+Once the module is installed you can drive the blocking client just like the Rust version. The snippet below opens a sequence, sends a user message, and prints the generated response:
 
 ```python
 from modelsocket import BlockingModelSocketClient
 
 client = BlockingModelSocketClient.connect(
-    "wss://api.modelsocket.com/v1",  # replace with your deployment URL
-    api_key="sk-example-123"         # optional API key if your endpoint requires one
+    "wss://models.mixlayer.ai/ws",
+    api_key="sk_example_123"
 )
-sequence = client.open(
-    "meta/llama-3-8b-instruct",
+seq = client.open(
+    "meta/llama-3.1-8b-instruct-free",
     tools_enabled=False,
 )
 
-sequence.append("Hello there!", role="user")
-reply = sequence.generate_text()
+seq.append("Hello there!", role="user")
+reply = sequence.gen_text()
 print(reply)
 
-sequence.close()
+seq.close()
 ```
-
-For more advanced flows you can use `generate_text_and_tokens` to capture token level information or `fork` to branch a conversation before issuing new prompts.
 
 ## License
 
-The crate is distributed under the terms of the MIT license.
+The crate is distributed under the terms of the Apache 2.0 license.
