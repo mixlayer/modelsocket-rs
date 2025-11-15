@@ -3,6 +3,9 @@ name = "modelsocket"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [features]
 default = []
 client = [
@@ -18,6 +21,7 @@ client = [
     "dep:url",
     "dep:uuid",
 ]
+python = ["client", "dep:pyo3"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -32,3 +36,4 @@ tokio-tungstenite = { version = "0.23.1", features = ["native-tls"], optional = 
 tracing = { version = "0.1", optional = true }
 url = { version = "2.5", optional = true }
 uuid = { version = "1.9", features = ["v4"], optional = true }
+pyo3 = { version = "0.21", features = ["extension-module"], optional = true }
