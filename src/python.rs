@@ -32,7 +32,7 @@ where
     runtime()?.block_on(future).map_err(map_err)
 }
 
-#[pyclass(name = "BlockingModelSocketClient", module = "modelsocket_py")]
+#[pyclass(name = "BlockingModelSocketClient", module = "modelsocket")]
 pub struct BlockingModelSocketClient {
     inner: ModelSocket,
 }
@@ -76,7 +76,7 @@ impl BlockingModelSocketClient {
     }
 }
 
-#[pyclass(name = "BlockingSequence", module = "modelsocket_py")]
+#[pyclass(name = "BlockingSequence", module = "modelsocket")]
 pub struct BlockingSequence {
     inner: Seq,
 }
@@ -232,7 +232,7 @@ fn build_gen_opts(
 }
 
 #[pymodule]
-fn modelsocket_py(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn modelsocket(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BlockingModelSocketClient>()?;
     m.add_class::<BlockingSequence>()?;
     Ok(())

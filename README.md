@@ -26,7 +26,7 @@ cargo test --features client
 
 ## Python bindings
 
-Enabling the `python` feature exposes a `modelsocket_py` extension module that wraps the Rust client in a "blocking" API.  Each blocking method spins up an internal Tokio runtime and executes the underlying asynchronous call, so the bindings feel natural to synchronous Python code while still reusing the Rust implementation.
+Enabling the `python` feature exposes a `modelsocket` extension module that wraps the Rust client in a "blocking" API.  The bindings reuse a shared single-threaded Tokio runtime under the hood so each call feels natural to synchronous Python code while still delegating the work to the async Rust implementation.
 
 ### Installing the bindings locally
 
@@ -39,14 +39,14 @@ pip install maturin
 maturin develop --release -F python
 ```
 
-The last command builds the extension module (`modelsocket_py`) in-place using the `python` feature flag and makes it importable inside the virtual environment.
+The last command builds the extension module (`modelsocket`) in-place using the `python` feature flag and makes it importable inside the virtual environment.
 
 ### Example
 
 Once the module is installed you can drive the blocking client just like the Rust version.  The snippet below opens a sequence, sends a user message, and prints the generated response:
 
 ```python
-from modelsocket_py import BlockingModelSocketClient
+from modelsocket import BlockingModelSocketClient
 
 client = BlockingModelSocketClient.connect(
     "wss://api.modelsocket.com/v1",  # replace with your deployment URL
