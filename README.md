@@ -52,13 +52,10 @@ client = BlockingModelSocketClient.connect(
     "wss://models.mixlayer.ai/ws",
     api_key="sk_example_123"
 )
-seq = client.open(
-    "meta/llama-3.1-8b-instruct-free",
-    tools_enabled=False,
-)
+seq = client.open("meta/llama-3.1-8b-instruct-free")
 
 seq.append("Hello there!", role="user")
-reply = sequence.gen_text()
+reply = seq.gen_text()
 print(reply)
 
 seq.close()
