@@ -25,11 +25,14 @@ fn runtime() -> PyResult<&'static Runtime> {
     })
 }
 
-fn block_on<F, T>(future: F) -> PyResult<T>
+fn block_on<F, T>(py: Python<'_>, future: F) -> PyResult<T>
 where
-    F: Future<Output = Result<T, ModelSocketError>>,
+    F: Future<Output = Result<T, ModelSocketError>> + Send,
+    T: Send,
 {
-    runtime()?.block_on(future).map_err(map_err)
+    let runtime = runtime()?;
+    let result = py.allow_threads(|| runtime.block_on(future));
+    result.map_err(map_err)
 }
 
 #[pyclass(name = "BlockingModelSocketClient", module = "modelsocket")]
@@ -46,7 +49,7 @@ impl BlockingModelSocketClient {
         signature = (url, api_key=None)
     )]
     pub fn connect(_cls: &Bound<'_, PyType>, url: &str, api_key: Option<&str>) -> PyResult<Self> {
-        let inner = block_on(ModelSocket::connect(url, api_key))?;
+        let inner = block_on(_cls.py(), ModelSocket::connect(url, api_key))?;
 
         Ok(Self { inner })
     }
@@ -64,12 +67,14 @@ impl BlockingModelSocketClient {
     ) -> PyResult<BlockingSequence> {
         let client = self.inner.clone();
 
-        let seq = block_on(async move {
-            let mut opts = OpenOpts::default();
-            opts.tools_enabled = tools_enabled.unwrap_or(false);
-            opts.tool_prompt = tool_prompt.map(|s| s.to_string());
-            opts.skip_prelude = skip_prelude.unwrap_or(false);
-            client.open(model, Some(opts)).await
+        let seq = Python::with_gil(|py| {
+            block_on(py, async move {
+                let mut opts = OpenOpts::default();
+                opts.tools_enabled = tools_enabled.unwrap_or(false);
+                opts.tool_prompt = tool_prompt.map(|s| s.to_string());
+                opts.skip_prelude = skip_prelude.unwrap_or(false);
+                client.open(model, Some(opts)).await
+            })
         })?;
 
         Ok(BlockingSequence { inner: seq })
@@ -86,10 +91,12 @@ impl BlockingSequence {
     #[pyo3(text_signature = "($self, text, /, *, role=None)", signature = (text, role=None))]
     pub fn append(&self, text: &str, role: Option<&str>) -> PyResult<()> {
         let seq = self.inner.clone();
-        block_on(async move {
-            let mut opts = AppendOpts::default();
-            opts.role = role.map(|r| r.to_string());
-            seq.append(text, opts).await
+        Python::with_gil(|py| {
+            block_on(py, async move {
+                let mut opts = AppendOpts::default();
+                opts.role = role.map(|r| r.to_string());
+                seq.append(text, opts).await
+            })
         })
     }
 
@@ -123,21 +130,23 @@ impl BlockingSequence {
     ) -> PyResult<String> {
         let seq = self.inner.clone();
 
-        block_on(async move {
-            let opts = build_gen_opts(
-                role,
-                stop_strings,
-                max_length,
-                max_tokens,
-                hidden,
-                temperature,
-                top_p,
-                top_k,
-                repeat_penalty,
-                seed,
-            );
-            let stream = seq.generate(Some(opts)).await?;
-            stream.text().await
+        Python::with_gil(|py| {
+            block_on(py, async move {
+                let opts = build_gen_opts(
+                    role,
+                    stop_strings,
+                    max_length,
+                    max_tokens,
+                    hidden,
+                    temperature,
+                    top_p,
+                    top_k,
+                    repeat_penalty,
+                    seed,
+                );
+                let stream = seq.generate(Some(opts)).await?;
+                stream.text().await
+            })
         })
     }
 
@@ -171,35 +180,37 @@ impl BlockingSequence {
     ) -> PyResult<(String, Vec<u32>)> {
         let seq = self.inner.clone();
 
-        block_on(async move {
-            let opts = build_gen_opts(
-                role,
-                stop_strings,
-                max_length,
-                max_tokens,
-                hidden,
-                temperature,
-                top_p,
-                top_k,
-                repeat_penalty,
-                seed,
-            );
-            let stream = seq.generate(Some(opts)).await?;
-            stream.text_and_tokens().await
+        Python::with_gil(|py| {
+            block_on(py, async move {
+                let opts = build_gen_opts(
+                    role,
+                    stop_strings,
+                    max_length,
+                    max_tokens,
+                    hidden,
+                    temperature,
+                    top_p,
+                    top_k,
+                    repeat_penalty,
+                    seed,
+                );
+                let stream = seq.generate(Some(opts)).await?;
+                stream.text_and_tokens().await
+            })
         })
     }
 
     #[pyo3(text_signature = "($self)")]
     pub fn close(&self) -> PyResult<()> {
         let seq = self.inner.clone();
-        block_on(async move { seq.close().await })
+        Python::with_gil(|py| block_on(py, async move { seq.close().await }))
     }
 
     #[pyo3(text_signature = "($self)")]
     pub fn fork(&self) -> PyResult<BlockingSequence> {
         let seq = self.inner.clone();
 
-        let child = block_on(async move { seq.fork().await })?;
+        let child = Python::with_gil(|py| block_on(py, async move { seq.fork().await }))?;
 
         Ok(BlockingSequence { inner: child })
     }
