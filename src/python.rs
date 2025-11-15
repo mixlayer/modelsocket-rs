@@ -31,7 +31,7 @@ where
     T: Send,
 {
     let runtime = runtime()?;
-    let result = py.allow_threads(|| runtime.block_on(future));
+    let result = py.detach(|| runtime.block_on(future));
     result.map_err(map_err)
 }
 
@@ -67,7 +67,7 @@ impl PyBlockingModelSocketClient {
     ) -> PyResult<PyBlockingSeq> {
         let client = self.inner.clone();
 
-        let seq = Python::with_gil(|py| {
+        let seq = Python::attach(|py| {
             block_on(py, async move {
                 let mut opts = OpenOpts::default();
                 opts.tools_enabled = tools_enabled.unwrap_or(false);
@@ -91,7 +91,7 @@ impl PyBlockingSeq {
     #[pyo3(text_signature = "($self, text, /, *, role=None)", signature = (text, role=None))]
     pub fn append(&self, text: &str, role: Option<&str>) -> PyResult<()> {
         let seq = self.inner.clone();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             block_on(py, async move {
                 let mut opts = AppendOpts::default();
                 opts.role = role.map(|r| r.to_string());
@@ -130,7 +130,7 @@ impl PyBlockingSeq {
     ) -> PyResult<String> {
         let seq = self.inner.clone();
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             block_on(py, async move {
                 let opts = build_gen_opts(
                     role,
@@ -180,7 +180,7 @@ impl PyBlockingSeq {
     ) -> PyResult<(String, Vec<u32>)> {
         let seq = self.inner.clone();
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             block_on(py, async move {
                 let opts = build_gen_opts(
                     role,
@@ -203,14 +203,14 @@ impl PyBlockingSeq {
     #[pyo3(text_signature = "($self)")]
     pub fn close(&self) -> PyResult<()> {
         let seq = self.inner.clone();
-        Python::with_gil(|py| block_on(py, async move { seq.close().await }))
+        Python::attach(|py| block_on(py, async move { seq.close().await }))
     }
 
     #[pyo3(text_signature = "($self)")]
     pub fn fork(&self) -> PyResult<PyBlockingSeq> {
         let seq = self.inner.clone();
 
-        let child = Python::with_gil(|py| block_on(py, async move { seq.fork().await }))?;
+        let child = Python::attach(|py| block_on(py, async move { seq.fork().await }))?;
 
         Ok(PyBlockingSeq { inner: child })
     }

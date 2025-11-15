@@ -45,5 +45,8 @@ tokio-tungstenite = { version = "0.23.1", features = [
 tracing = { version = "0.1", optional = true }
 url = { version = "2.5", optional = true }
 uuid = { version = "1.9", features = ["v4"], optional = true }
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"], optional = true }
+pyo3 = { version = "0.27", features = [
+    "extension-module",
+    "abi3-py39",
+], optional = true }
 once_cell = { version = "1.19", optional = true }
