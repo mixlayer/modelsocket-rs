@@ -1,9 +1,9 @@
 mod seq;
 pub mod transport;
 
+use crate::protocol::{MSEvent, MSRequest, SeqGenReq, SeqOpenReq};
 use futures::{Sink, Stream};
 use futures_util::{SinkExt, StreamExt};
-use modelsocket_common::{MSEvent, MSRequest, SeqGenReq, SeqOpenReq};
 pub use seq::{GenChunk, GenStream, Seq};
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use thiserror::Error;

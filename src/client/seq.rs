@@ -1,7 +1,7 @@
-use futures::Stream;
-use modelsocket_common::{
+use crate::protocol::{
     MSEvent, MSRequest, SeqAppendReq, SeqCloseReq, SeqCommand, SeqForkReq, SeqGenReq,
 };
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,

@@ -1,6 +1,6 @@
+use crate::protocol::{MSEvent, MSRequest};
 use crate::ModelSocketError;
 use futures::{Sink, Stream};
-use modelsocket_common::{MSEvent, MSRequest};
 
 pub mod ws;
 

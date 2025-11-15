@@ -1,7 +1,7 @@
+use crate::protocol::MSRequest;
 use futures::{stream::SplitStream, Sink, Stream};
 use futures_util::{stream::SplitSink, StreamExt};
 use http::{Request, Uri};
-use modelsocket_common::MSRequest;
 use std::pin::Pin;
 
 use tokio::net::TcpStream;
@@ -139,7 +139,7 @@ impl WsStream {
 }
 
 impl Stream for WsStream {
-    type Item = Result<modelsocket_common::MSEvent, ModelSocketError>;
+    type Item = Result<crate::protocol::MSEvent, ModelSocketError>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
@@ -148,7 +148,7 @@ impl Stream for WsStream {
         match self.inner.as_mut().poll_next(cx) {
             std::task::Poll::Ready(Some(Ok(msg))) => {
                 if let Message::Text(text) = msg {
-                    match serde_json::from_str::<modelsocket_common::MSEvent>(&text) {
+                    match serde_json::from_str::<crate::protocol::MSEvent>(&text) {
                         Ok(event) => std::task::Poll::Ready(Some(Ok(event))),
                         Err(e) => std::task::Poll::Ready(Some(Err(ModelSocketError::Json(e)))),
                     }

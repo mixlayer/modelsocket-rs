@@ -547,7 +547,6 @@ dependencies = [
  "futures",
  "futures-util",
  "http",
- "modelsocket-common",
  "serde",
  "serde_json",
  "thiserror",
@@ -556,13 +555,6 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "modelsocket-common"
-version = "0.1.0"
-dependencies = [
- "serde",
 ]
 
 [[package]]
