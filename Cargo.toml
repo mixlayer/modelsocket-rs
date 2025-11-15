@@ -36,4 +36,4 @@ tokio-tungstenite = { version = "0.23.1", features = ["native-tls"], optional = 
 tracing = { version = "0.1", optional = true }
 url = { version = "2.5", optional = true }
 uuid = { version = "1.9", features = ["v4"], optional = true }
-pyo3 = { version = "0.21", features = ["extension-module"], optional = true }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"], optional = true }
