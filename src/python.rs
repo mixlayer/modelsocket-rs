@@ -1,8 +1,10 @@
-use std::sync::Arc;
+use std::future::Future;
 
+use once_cell::sync::OnceCell;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyModule, PyType};
+use tokio::runtime::{Builder, Runtime};
 
 use crate::client::{AppendOpts, GenOpts, ModelSocket, ModelSocketError, OpenOpts, Seq};
 
@@ -10,9 +12,28 @@ fn map_err(err: ModelSocketError) -> PyErr {
     PyRuntimeError::new_err(err.to_string())
 }
 
+static RUNTIME: OnceCell<Runtime> = OnceCell::new();
+
+fn runtime() -> PyResult<&'static Runtime> {
+    RUNTIME.get_or_try_init(|| {
+        Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| {
+                PyRuntimeError::new_err(format!("failed to create tokio runtime: {err}"))
+            })
+    })
+}
+
+fn block_on<F, T>(future: F) -> PyResult<T>
+where
+    F: Future<Output = Result<T, ModelSocketError>>,
+{
+    runtime()?.block_on(future).map_err(map_err)
+}
+
 #[pyclass(name = "BlockingModelSocketClient", module = "modelsocket_py")]
 pub struct BlockingModelSocketClient {
-    runtime: Arc<tokio::runtime::Runtime>,
     inner: ModelSocket,
 }
 
@@ -25,18 +46,9 @@ impl BlockingModelSocketClient {
         signature = (url, api_key=None)
     )]
     pub fn connect(_cls: &Bound<'_, PyType>, url: &str, api_key: Option<&str>) -> PyResult<Self> {
-        let runtime = tokio::runtime::Runtime::new().map_err(|err| {
-            PyRuntimeError::new_err(format!("failed to create tokio runtime: {err}"))
-        })?;
+        let inner = block_on(ModelSocket::connect(url, api_key))?;
 
-        let inner = runtime
-            .block_on(ModelSocket::connect(url, api_key))
-            .map_err(map_err)?;
-
-        Ok(Self {
-            runtime: Arc::new(runtime),
-            inner,
-        })
+        Ok(Self { inner })
     }
 
     #[pyo3(
@@ -50,29 +62,22 @@ impl BlockingModelSocketClient {
         tool_prompt: Option<&str>,
         skip_prelude: Option<bool>,
     ) -> PyResult<BlockingSequence> {
-        let runtime = self.runtime.clone();
         let client = self.inner.clone();
 
-        let seq = runtime
-            .block_on(async move {
-                let mut opts = OpenOpts::default();
-                opts.tools_enabled = tools_enabled.unwrap_or(false);
-                opts.tool_prompt = tool_prompt.map(|s| s.to_string());
-                opts.skip_prelude = skip_prelude.unwrap_or(false);
-                client.open(model, Some(opts)).await
-            })
-            .map_err(map_err)?;
+        let seq = block_on(async move {
+            let mut opts = OpenOpts::default();
+            opts.tools_enabled = tools_enabled.unwrap_or(false);
+            opts.tool_prompt = tool_prompt.map(|s| s.to_string());
+            opts.skip_prelude = skip_prelude.unwrap_or(false);
+            client.open(model, Some(opts)).await
+        })?;
 
-        Ok(BlockingSequence {
-            runtime,
-            inner: seq,
-        })
+        Ok(BlockingSequence { inner: seq })
     }
 }
 
 #[pyclass(name = "BlockingSequence", module = "modelsocket_py")]
 pub struct BlockingSequence {
-    runtime: Arc<tokio::runtime::Runtime>,
     inner: Seq,
 }
 
@@ -80,15 +85,12 @@ pub struct BlockingSequence {
 impl BlockingSequence {
     #[pyo3(text_signature = "($self, text, /, *, role=None)", signature = (text, role=None))]
     pub fn append(&self, text: &str, role: Option<&str>) -> PyResult<()> {
-        let runtime = self.runtime.clone();
         let seq = self.inner.clone();
-        runtime
-            .block_on(async move {
-                let mut opts = AppendOpts::default();
-                opts.role = role.map(|r| r.to_string());
-                seq.append(text, opts).await
-            })
-            .map_err(map_err)
+        block_on(async move {
+            let mut opts = AppendOpts::default();
+            opts.role = role.map(|r| r.to_string());
+            seq.append(text, opts).await
+        })
     }
 
     #[pyo3(
@@ -119,27 +121,24 @@ impl BlockingSequence {
         repeat_penalty: Option<f32>,
         seed: Option<u64>,
     ) -> PyResult<String> {
-        let runtime = self.runtime.clone();
         let seq = self.inner.clone();
 
-        runtime
-            .block_on(async move {
-                let opts = build_gen_opts(
-                    role,
-                    stop_strings,
-                    max_length,
-                    max_tokens,
-                    hidden,
-                    temperature,
-                    top_p,
-                    top_k,
-                    repeat_penalty,
-                    seed,
-                );
-                let stream = seq.generate(Some(opts)).await?;
-                stream.text().await
-            })
-            .map_err(map_err)
+        block_on(async move {
+            let opts = build_gen_opts(
+                role,
+                stop_strings,
+                max_length,
+                max_tokens,
+                hidden,
+                temperature,
+                top_p,
+                top_k,
+                repeat_penalty,
+                seed,
+            );
+            let stream = seq.generate(Some(opts)).await?;
+            stream.text().await
+        })
     }
 
     #[pyo3(
@@ -170,51 +169,39 @@ impl BlockingSequence {
         repeat_penalty: Option<f32>,
         seed: Option<u64>,
     ) -> PyResult<(String, Vec<u32>)> {
-        let runtime = self.runtime.clone();
         let seq = self.inner.clone();
 
-        runtime
-            .block_on(async move {
-                let opts = build_gen_opts(
-                    role,
-                    stop_strings,
-                    max_length,
-                    max_tokens,
-                    hidden,
-                    temperature,
-                    top_p,
-                    top_k,
-                    repeat_penalty,
-                    seed,
-                );
-                let stream = seq.generate(Some(opts)).await?;
-                stream.text_and_tokens().await
-            })
-            .map_err(map_err)
+        block_on(async move {
+            let opts = build_gen_opts(
+                role,
+                stop_strings,
+                max_length,
+                max_tokens,
+                hidden,
+                temperature,
+                top_p,
+                top_k,
+                repeat_penalty,
+                seed,
+            );
+            let stream = seq.generate(Some(opts)).await?;
+            stream.text_and_tokens().await
+        })
     }
 
     #[pyo3(text_signature = "($self)")]
     pub fn close(&self) -> PyResult<()> {
-        let runtime = self.runtime.clone();
         let seq = self.inner.clone();
-        runtime
-            .block_on(async move { seq.close().await })
-            .map_err(map_err)
+        block_on(async move { seq.close().await })
     }
 
     #[pyo3(text_signature = "($self)")]
     pub fn fork(&self) -> PyResult<BlockingSequence> {
-        let runtime = self.runtime.clone();
         let seq = self.inner.clone();
 
-        let child = runtime
-            .block_on(async move { seq.fork().await })
-            .map_err(map_err)?;
+        let child = block_on(async move { seq.fork().await })?;
 
-        Ok(BlockingSequence {
-            runtime,
-            inner: child,
-        })
+        Ok(BlockingSequence { inner: child })
     }
 }
 
