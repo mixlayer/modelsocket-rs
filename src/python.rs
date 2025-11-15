@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::{PyModule, PyType};
 
 use crate::client::{AppendOpts, GenOpts, ModelSocket, ModelSocketError, OpenOpts, Seq};
 
@@ -18,8 +19,12 @@ pub struct BlockingModelSocketClient {
 #[pymethods]
 impl BlockingModelSocketClient {
     #[classmethod]
-    #[pyo3(name = "connect", text_signature = "(url, api_key=None)")]
-    pub fn connect(_cls: &PyType, url: &str, api_key: Option<&str>) -> PyResult<Self> {
+    #[pyo3(
+        name = "connect",
+        text_signature = "(url, api_key=None)",
+        signature = (url, api_key=None)
+    )]
+    pub fn connect(_cls: &Bound<'_, PyType>, url: &str, api_key: Option<&str>) -> PyResult<Self> {
         let runtime = tokio::runtime::Runtime::new().map_err(|err| {
             PyRuntimeError::new_err(format!("failed to create tokio runtime: {err}"))
         })?;
@@ -35,7 +40,8 @@ impl BlockingModelSocketClient {
     }
 
     #[pyo3(
-        text_signature = "($self, model, /, *, tools_enabled=False, tool_prompt=None, skip_prelude=False)"
+        text_signature = "($self, model, /, *, tools_enabled=False, tool_prompt=None, skip_prelude=False)",
+        signature = (model, tools_enabled=None, tool_prompt=None, skip_prelude=None)
     )]
     pub fn open(
         &self,
@@ -72,7 +78,7 @@ pub struct BlockingSequence {
 
 #[pymethods]
 impl BlockingSequence {
-    #[pyo3(text_signature = "($self, text, /, *, role=None)")]
+    #[pyo3(text_signature = "($self, text, /, *, role=None)", signature = (text, role=None))]
     pub fn append(&self, text: &str, role: Option<&str>) -> PyResult<()> {
         let runtime = self.runtime.clone();
         let seq = self.inner.clone();
@@ -86,7 +92,19 @@ impl BlockingSequence {
     }
 
     #[pyo3(
-        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None)"
+        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None)",
+        signature = (
+            role=None,
+            stop_strings=None,
+            max_length=None,
+            max_tokens=None,
+            hidden=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            repeat_penalty=None,
+            seed=None
+        )
     )]
     pub fn generate_text(
         &self,
@@ -125,7 +143,19 @@ impl BlockingSequence {
     }
 
     #[pyo3(
-        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None)"
+        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None)",
+        signature = (
+            role=None,
+            stop_strings=None,
+            max_length=None,
+            max_tokens=None,
+            hidden=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            repeat_penalty=None,
+            seed=None
+        )
     )]
     pub fn generate_text_and_tokens(
         &self,
@@ -215,7 +245,7 @@ fn build_gen_opts(
 }
 
 #[pymodule]
-fn modelsocket_py(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn modelsocket_py(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BlockingModelSocketClient>()?;
     m.add_class::<BlockingSequence>()?;
     Ok(())
