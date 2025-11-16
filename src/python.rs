@@ -7,7 +7,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyModule, PyType};
 use tokio::runtime::{Builder, Runtime};
 
-use crate::client::{AppendOpts, GenOpts, ModelSocket, ModelSocketError, OpenOpts, Seq};
+use crate::client::{
+    AppendOpts, GenChunk, GenOpts, GenStream, ModelSocket, ModelSocketError, OpenOpts, Seq,
+};
 
 fn map_err(err: ModelSocketError) -> PyErr {
     PyRuntimeError::new_err(err.to_string())
@@ -229,6 +231,56 @@ impl PyBlockingSeq {
         })
     }
 
+    #[pyo3(
+        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None)",
+        signature = (
+            role=None,
+            stop_strings=None,
+            max_length=None,
+            max_tokens=None,
+            hidden=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            repeat_penalty=None,
+            seed=None
+        )
+    )]
+    pub fn gen_text_stream(
+        &self,
+        py: Python<'_>,
+        role: Option<&str>,
+        stop_strings: Option<Vec<String>>,
+        max_length: Option<u32>,
+        max_tokens: Option<u32>,
+        hidden: Option<bool>,
+        temperature: Option<f32>,
+        top_p: Option<f32>,
+        top_k: Option<i32>,
+        repeat_penalty: Option<f32>,
+        seed: Option<u64>,
+    ) -> PyResult<Py<PyBlockingGenStream>> {
+        let seq = self.inner.clone();
+
+        let stream = block_on(py, async move {
+            let opts = build_gen_opts(
+                role,
+                stop_strings,
+                max_length,
+                max_tokens,
+                hidden,
+                temperature,
+                top_p,
+                top_k,
+                repeat_penalty,
+                seed,
+            );
+            seq.generate(Some(opts)).await
+        })?;
+
+        Py::new(py, PyBlockingGenStream::new(stream))
+    }
+
     #[pyo3(text_signature = "($self)")]
     pub fn close(&self) -> PyResult<()> {
         let seq = self.inner.clone();
@@ -242,6 +294,86 @@ impl PyBlockingSeq {
         let child = Python::attach(|py| block_on(py, async move { seq.fork().await }))?;
 
         Ok(PyBlockingSeq { inner: child })
+    }
+}
+
+#[pyclass(name = "BlockingGenStream", module = "modelsocket")]
+pub struct PyBlockingGenStream {
+    stream: Option<GenStream>,
+}
+
+impl PyBlockingGenStream {
+    fn new(stream: GenStream) -> Self {
+        Self {
+            stream: Some(stream),
+        }
+    }
+}
+
+#[pymethods]
+impl PyBlockingGenStream {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyGenEvent>>> {
+        let Some(stream) = self.stream.take() else {
+            return Ok(None);
+        };
+
+        let (stream, chunk) = block_on(py, async move {
+            let mut stream = stream;
+            let next = stream.next_chunk().await;
+            Ok((stream, next))
+        })?;
+
+        if let Some(chunk) = chunk {
+            let event = Py::new(py, PyGenEvent::from(chunk))?;
+            self.stream = Some(stream);
+            Ok(Some(event))
+        } else {
+            self.stream = None;
+            Ok(None)
+        }
+    }
+}
+
+#[pyclass(name = "GenEvent", module = "modelsocket")]
+pub struct PyGenEvent {
+    #[pyo3(get)]
+    text: String,
+    #[pyo3(get)]
+    hidden: bool,
+    #[pyo3(get)]
+    tokens: Option<Vec<u32>>,
+}
+
+impl From<GenChunk> for PyGenEvent {
+    fn from(chunk: GenChunk) -> Self {
+        Self {
+            text: chunk.text,
+            hidden: chunk.hidden,
+            tokens: chunk.tokens,
+        }
+    }
+}
+
+#[pymethods]
+impl PyGenEvent {
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!(
+            "GenEvent(text={:?}, hidden={}, tokens={})",
+            self.text,
+            self.hidden,
+            match &self.tokens {
+                Some(tokens) => format!("{:?}", tokens),
+                None => "None".to_string(),
+            }
+        ))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.text.clone())
     }
 }
 
@@ -275,5 +407,7 @@ fn build_gen_opts(
 fn modelsocket(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBlockingModelSocketClient>()?;
     m.add_class::<PyBlockingSeq>()?;
+    m.add_class::<PyBlockingGenStream>()?;
+    m.add_class::<PyGenEvent>()?;
     Ok(())
 }
