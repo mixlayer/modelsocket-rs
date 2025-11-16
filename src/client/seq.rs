@@ -293,6 +293,10 @@ impl Stream for GenStream {
 }
 
 impl GenStream {
+    pub async fn next_chunk(&mut self) -> Option<GenChunk> {
+        self.stream.recv().await
+    }
+
     pub async fn text(mut self) -> Result<String, ModelSocketError> {
         let mut result = String::new();
         while let Some(chunk) = self.stream.recv().await {
