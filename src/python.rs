@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::time::Duration;
 
 use once_cell::sync::OnceCell;
 use pyo3::exceptions::PyRuntimeError;
@@ -25,14 +26,42 @@ fn runtime() -> PyResult<&'static Runtime> {
     })
 }
 
+/// Block on a future, checking for signals every 100ms.
+/// Allows a future being blocked on to be interrupted by ctrl+c.
 fn block_on<F, T>(py: Python<'_>, future: F) -> PyResult<T>
 where
     F: Future<Output = Result<T, ModelSocketError>> + Send,
     T: Send,
 {
     let runtime = runtime()?;
-    let result = py.detach(|| runtime.block_on(future));
-    result.map_err(map_err)
+
+    let signal_fut = {
+        async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                tick.tick().await;
+                if let Err(err) = Python::attach(|py| py.check_signals()) {
+                    return err;
+                }
+            }
+        }
+    };
+
+    let f = async move {
+        tokio::pin! {
+            let work = future;
+            let signals = signal_fut;
+        };
+
+        tokio::select! {
+            f = &mut work => f.map_err(map_err),
+            _signal = &mut signals => {
+                return Err(PyRuntimeError::new_err("interrupted by signal"));
+            },
+        }
+    };
+
+    py.detach(|| runtime.block_on(f))
 }
 
 #[pyclass(name = "BlockingModelSocketClient", module = "modelsocket")]
