@@ -55,8 +55,15 @@ client = BlockingModelSocketClient.connect(
 seq = client.open("meta/llama-3.1-8b-instruct-free")
 
 seq.append("Hello there!", role="user")
+
+# blocking generate
 reply = seq.gen_text()
 print(reply)
+
+# ...or streaming generate
+stream = seq.gen_text_stream(role="assistant",max_tokens=200)
+for chunk in stream:
+    print(chunk, end="", flush=True)
 
 seq.close()
 ```
