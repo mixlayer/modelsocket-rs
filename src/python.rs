@@ -1,13 +1,17 @@
+use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use once_cell::sync::OnceCell;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyModule, PyType};
 use tokio::runtime::{Builder, Runtime};
 
 use crate::client::{
+    tools::{Tool, ToolDefinition, ToolParameters, Toolbox},
     AppendOpts, GenChunk, GenOpts, GenStream, ModelSocket, ModelSocketError, OpenOpts, Seq,
 };
 
@@ -86,22 +90,36 @@ impl PyBlockingModelSocketClient {
     }
 
     #[pyo3(
-        text_signature = "($self, model, /, *, tools_enabled=False, tool_prompt=None, skip_prelude=False)",
-        signature = (model, tool_prompt=None, skip_prelude=None)
+        text_signature = "($self, model, /, *, tools=None, tool_prompt=None, skip_prelude=False)",
+        signature = (model, tools=None, tool_prompt=None, skip_prelude=None)
     )]
     pub fn open(
         &self,
+        py: Python<'_>,
         model: &str,
-        // tools_enabled: Option<bool>,
+        tools: Option<Vec<Py<PyTool>>>,
         tool_prompt: Option<&str>,
         skip_prelude: Option<bool>,
     ) -> PyResult<PyBlockingSeq> {
         let client = self.inner.clone();
 
+        let toolbox = tools.and_then(|tool_list| {
+            if tool_list.is_empty() {
+                return None;
+            }
+
+            let mut toolbox = Toolbox::new();
+            for tool in tool_list {
+                let tool_ref = tool.borrow(py);
+                toolbox.add_tool(tool_ref.clone_tool(py));
+            }
+            Some(toolbox)
+        });
+
         let seq = Python::attach(|py| {
             block_on(py, async move {
                 let mut opts = OpenOpts::default();
-                // opts.tools_enabled = tools_enabled.unwrap_or(false);
+                opts.toolbox = toolbox;
                 opts.tool_prompt = tool_prompt.map(|s| s.to_string());
                 opts.skip_prelude = skip_prelude.unwrap_or(false);
                 client.open(model, Some(opts)).await
@@ -383,6 +401,123 @@ impl PyGenEvent {
     }
 }
 
+#[pyclass(name = "Tool", module = "modelsocket")]
+pub struct PyTool {
+    tool: PythonTool,
+}
+
+#[pymethods]
+impl PyTool {
+    #[new]
+    #[pyo3(signature = (name, description, parameters=None, function=None))]
+    pub fn new(
+        py: Python<'_>,
+        name: &str,
+        description: &str,
+        parameters: Option<Py<PyAny>>,
+        function: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
+        let handler = function
+            .ok_or_else(|| PyTypeError::new_err("function is required"))?;
+
+        let callable = handler.bind(py);
+        if !callable.is_callable() {
+            return Err(PyTypeError::new_err("function must be callable"));
+        }
+
+        let params = if let Some(obj) = parameters {
+            parse_tool_parameters(py, obj)?
+        } else {
+            ToolParameters::default()
+        };
+
+        let definition = ToolDefinition {
+            name: name.to_string(),
+            description: description.to_string(),
+            parameters: params,
+        };
+
+        Ok(Self {
+            tool: PythonTool::new(definition, handler),
+        })
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("Tool(name={:?})", self.tool.definition.name))
+    }
+}
+
+impl PyTool {
+    fn clone_tool(&self, py: Python<'_>) -> PythonTool {
+        self.tool.clone_with_gil(py)
+    }
+}
+
+struct PythonTool {
+    definition: ToolDefinition,
+    handler: Py<PyAny>,
+}
+
+impl PythonTool {
+    fn new(definition: ToolDefinition, handler: Py<PyAny>) -> Self {
+        Self {
+            definition,
+            handler,
+        }
+    }
+
+    fn clone_with_gil(&self, py: Python<'_>) -> Self {
+        Self {
+            definition: self.definition.clone(),
+            handler: self.handler.clone_ref(py),
+        }
+    }
+}
+
+impl fmt::Debug for PythonTool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PythonTool")
+            .field("name", &self.definition.name)
+            .finish()
+    }
+}
+
+impl Tool for PythonTool {
+    fn definition(&self) -> ToolDefinition {
+        self.definition.clone()
+    }
+
+    fn call(
+        &self,
+        args: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, anyhow::Error>> + Send>> {
+        let handler =
+            Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(self.handler.clone_ref(py)) })
+                .expect("failed to clone tool handler");
+        let args = args.to_string();
+
+        Box::pin(async move {
+            Python::attach(|py| {
+                let callable = handler.bind(py);
+                let result = callable.call1((args.clone(),))?;
+                result.extract::<String>()
+            })
+            .map_err(|err| anyhow!(err.to_string()))
+        })
+    }
+}
+
+fn parse_tool_parameters(py: Python<'_>, value: Py<PyAny>) -> PyResult<ToolParameters> {
+    let bound = value.bind(py);
+    let json = PyModule::import(py, "json")?
+        .call_method1("dumps", (bound,))?
+        .extract::<String>()?;
+
+    serde_json::from_str(&json).map_err(|err| {
+        PyTypeError::new_err(format!("invalid tool parameters schema: {err}"))
+    })
+}
+
 fn build_gen_opts(
     role: Option<&str>,
     stop_strings: Option<Vec<String>>,
@@ -415,5 +550,6 @@ fn modelsocket(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBlockingSeq>()?;
     m.add_class::<PyBlockingGenStream>()?;
     m.add_class::<PyGenEvent>()?;
+    m.add_class::<PyTool>()?;
     Ok(())
 }
