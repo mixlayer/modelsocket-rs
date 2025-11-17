@@ -2,7 +2,6 @@ pub mod protocol;
 
 use std::sync::Once;
 
-use once_cell::sync::Lazy;
 pub use protocol::*;
 
 #[cfg(feature = "client")]
