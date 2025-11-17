@@ -8,6 +8,8 @@ pub async fn print_stream(mut stream: GenStream, hidden: bool, colors: bool) -> 
     let mut stdout = stdout();
 
     while let Some(event) = stream.next().await {
+        let event = event?;
+
         if !hidden && event.hidden {
             continue;
         }

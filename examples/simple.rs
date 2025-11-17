@@ -8,12 +8,7 @@ mod utils;
 struct Args {
     #[clap(short, long, default_value = "wss://models.mixlayer.ai/ws")]
     url: String,
-    #[clap(
-        short,
-        long,
-        env = "MODELSOCKET_API_KEY",
-        default_value = "sk_7n35AnkX_UmtXtKpWgE9Ls3xpeJRDl3pOr8ChfIlXuJW1MDnGOv0"
-    )]
+    #[clap(short, long, env = "MODELSOCKET_API_KEY")]
     api_key: String,
     #[clap(long, long, default_value_t = false)]
     hidden: bool,

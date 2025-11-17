@@ -1,7 +1,11 @@
 mod seq;
+pub mod tools;
 pub mod transport;
 
-use crate::protocol::{MSEvent, MSRequest, SeqGenReq, SeqOpenReq};
+use crate::{
+    protocol::{MSEvent, MSRequest, SeqGenReq, SeqOpenReq},
+    tools::Toolbox,
+};
 use futures::{Sink, Stream};
 use futures_util::{SinkExt, StreamExt};
 pub use seq::{GenChunk, GenStream, Seq};
@@ -35,11 +39,14 @@ pub enum ModelSocketError {
     #[error("channel closed")]
     Send(#[from] mpsc::error::SendError<Message>),
 
+    #[error("seq closed")]
+    SeqClosed,
+
     #[error("command error: {0}")]
     Command(String),
 
-    #[error("other: {0}")]
-    Other(anyhow::Error),
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
 }
 
 #[derive(Clone)]
@@ -177,12 +184,13 @@ impl ModelSocket {
         }
 
         let opts = opts.unwrap_or_default();
+        let tools_enabled = opts.toolbox.is_some();
 
         self.send(MSRequest::SeqOpen {
             cid: cid.clone(),
             data: SeqOpenReq {
                 model: model.to_string(),
-                tools_enabled: opts.tools_enabled,
+                tools_enabled,
                 tool_prompt: opts.tool_prompt,
                 skip_prelude: opts.skip_prelude,
             },
@@ -195,10 +203,14 @@ impl ModelSocket {
             ))
         })?;
 
+        let tool_def_prompt = opts.toolbox.as_ref().map(|t| t.tool_def_prompt());
+        let toolbox = Arc::new(opts.toolbox.map(|t| Mutex::new(t)));
+
         let seq = Seq::new(
             seq_id.clone(),
             model.to_string(),
             self.clone_components(),
+            toolbox,
             None,
         );
 
@@ -208,6 +220,11 @@ impl ModelSocket {
             seq_event_handler.event_tx = opts.event_sink;
 
             seqs.insert(seq_id, seq_event_handler);
+        }
+
+        // append tool definition prompts to the sequence
+        if let Some(tool_def_prompt) = tool_def_prompt {
+            seq.append(tool_def_prompt, AppendOpts::system()).await?;
         }
 
         Ok(seq)
@@ -303,10 +320,6 @@ impl AppendOpts {
 
 #[derive(Default, Debug)]
 pub struct OpenOpts {
-    /// Enable too use on the sequence. Will instruct the engine
-    /// to append tool instructions to the system prompt.
-    pub tools_enabled: bool,
-
     /// Optional system prompt to use when tools are enabled
     pub tool_prompt: Option<String>,
 
@@ -316,4 +329,7 @@ pub struct OpenOpts {
     /// Optional sink for listening to all events related
     /// to this sequence
     pub event_sink: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
+
+    /// Tools available for use on this sequence
+    pub toolbox: Option<Toolbox>,
 }
