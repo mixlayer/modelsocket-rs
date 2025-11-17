@@ -1,6 +1,6 @@
 [package]
 name = "modelsocket"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A Rust library for ModelSocket, a protocol for efficiently integrating with LLMs"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ keywords = ["modelsocket", "ai", "llm"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["client"]
 client = [
     "dep:anyhow",
     "dep:futures",
@@ -34,11 +34,7 @@ futures-util = { version = "0.3", optional = true }
 http = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 thiserror = { version = "1", optional = true }
-tokio = { version = "1", features = [
-    "full",
-    "macros",
-    "rt-multi-thread",
-], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
 tokio-tungstenite = { version = "0.23.1", features = [
     "native-tls",
 ], optional = true }
@@ -50,3 +46,12 @@ pyo3 = { version = "0.27", features = [
     "abi3-py39",
 ], optional = true }
 once_cell = { version = "1.19", optional = true }
+
+[dev-dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.51", features = ["derive", "env"] }
+colorize = "0.1.0"
+futures = "0.3"
+meval = "0.2.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = "0.3.20"

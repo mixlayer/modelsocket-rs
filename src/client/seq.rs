@@ -1,5 +1,7 @@
-use crate::protocol::{
-    MSEvent, MSRequest, SeqAppendReq, SeqCloseReq, SeqCommand, SeqForkReq, SeqGenReq,
+use crate::{
+    protocol::{MSEvent, MSRequest, SeqAppendReq, SeqCloseReq, SeqCommand, SeqForkReq, SeqGenReq},
+    tools::Toolbox,
+    SeqToolCall, SeqToolReturnReq,
 };
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -10,7 +12,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use crate::{AppendOpts, ModelSocket, ModelSocketError};
@@ -21,7 +23,8 @@ pub struct Seq {
     model: String,
     socket: ModelSocket,
     cmds: Arc<Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, ModelSocketError>>>>>,
-    gen_streams: Arc<Mutex<HashMap<String, mpsc::Sender<GenChunk>>>>,
+    gen_streams: Arc<Mutex<HashMap<String, mpsc::Sender<Result<GenChunk, ModelSocketError>>>>>,
+    toolbox: Arc<Option<Mutex<Toolbox>>>,
     pub(crate) event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
 }
 
@@ -30,6 +33,7 @@ impl Seq {
         seq_id: String,
         model: String,
         socket: ModelSocket,
+        toolbox: Arc<Option<Mutex<Toolbox>>>,
         event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
     ) -> Self {
         Self {
@@ -39,6 +43,7 @@ impl Seq {
             cmds: Arc::new(Mutex::new(HashMap::new())),
             gen_streams: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
+            toolbox,
         }
     }
 
@@ -73,9 +78,9 @@ impl Seq {
             MSEvent::SeqClosed { cid, .. } => {
                 self.on_close(cid).await;
             }
-            // MSEvent::SeqToolCall { cid, tool_calls, .. } => {
-            //     self.on_tool_call(cid, tool_calls.clone()).await
-            // }
+            MSEvent::SeqToolCall {
+                cid, tool_calls, ..
+            } => self.on_tool_call(cid, tool_calls).await,
             _ => {
                 warn!("unhandled event in seq: {:?}", event);
             }
@@ -109,7 +114,7 @@ impl Seq {
                 tokens,
             };
 
-            if sender.send(chunk).await.is_err() {
+            if sender.send(Ok(chunk)).await.is_err() {
                 // Stream closed, remove it
                 gen_streams.remove(cid);
             }
@@ -137,6 +142,7 @@ impl Seq {
                 child_seq_id.to_string(),
                 self.model.clone(),
                 self.socket.clone(),
+                self.toolbox.clone(),
                 None,
             );
             self.socket
@@ -147,6 +153,44 @@ impl Seq {
 
             let child_seq_json = serde_json::to_value(child_seq_id).unwrap();
             let _ = sender.send(Ok(child_seq_json)).await;
+        }
+    }
+
+    async fn on_tool_call(&mut self, cid: &str, tool_calls: &Vec<SeqToolCall>) {
+        let Some(toolbox) = self.toolbox.as_ref() else {
+            debug!(
+                seq_id = self.seq_id,
+                "tool call requested but tools disabled"
+            );
+
+            return;
+        };
+
+        let results = toolbox.lock().await.call_tools(tool_calls).await;
+
+        match results {
+            Ok(results) => {
+                // let results_json = serde_json::to_value(results).unwrap();
+
+                let response = MSRequest::SeqCommand {
+                    cid: cid.to_string(),
+                    seq_id: self.seq_id.clone(),
+                    data: SeqCommand::ToolReturn(SeqToolReturnReq {
+                        results,
+                        gen_opts: Default::default(), //TODO resume generating with the same options
+                    }),
+                };
+
+                if let Err(err) = self.socket.send(response).await {
+                    error!("failed to send tool return response: {}", err);
+                }
+            }
+            Err(e) => {
+                error!("failed to call tools: {}", e);
+                if let Err(err) = self.close().await {
+                    error!("failed to close seq after tool call error: {}", err);
+                }
+            }
         }
     }
 
@@ -253,7 +297,7 @@ impl Seq {
             .lock()
             .await
             .get(&child_seq_id)
-            .unwrap()
+            .ok_or_else(|| ModelSocketError::State("child seq not found".into()))?
             .clone();
 
         Ok(child_seq)
@@ -261,8 +305,27 @@ impl Seq {
 
     pub async fn close(&self) -> Result<(), ModelSocketError> {
         let cid = Uuid::new_v4().to_string();
+
+        let mut cmds = self.cmds.lock().await;
+
+        // send an error to any outstanding commands on this seqs
+        for (_cid, tx) in cmds.drain() {
+            let _ = tx.send(Err(ModelSocketError::SeqClosed)).await;
+        }
+
+        let mut gen_streams = self.gen_streams.lock().await;
+        for (_cid, tx) in gen_streams.drain() {
+            let _ = tx.send(Err(ModelSocketError::SeqClosed)).await;
+        }
+        drop(gen_streams);
+
+        //TODO add some kind of state marker to indicate that no more commands may
+        // be sent to this seq
+
         let (tx, mut rx) = mpsc::channel(1);
-        self.cmds.lock().await.insert(cid.clone(), tx);
+        cmds.insert(cid.clone(), tx);
+
+        drop(cmds);
 
         self.socket
             .send(MSRequest::SeqCommand {
@@ -281,11 +344,11 @@ impl Seq {
 }
 
 pub struct GenStream {
-    stream: mpsc::Receiver<GenChunk>,
+    stream: mpsc::Receiver<Result<GenChunk, ModelSocketError>>,
 }
 
 impl Stream for GenStream {
-    type Item = GenChunk;
+    type Item = Result<GenChunk, ModelSocketError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.stream.poll_recv(cx)
@@ -293,13 +356,10 @@ impl Stream for GenStream {
 }
 
 impl GenStream {
-    pub async fn next_chunk(&mut self) -> Option<GenChunk> {
-        self.stream.recv().await
-    }
-
     pub async fn text(mut self) -> Result<String, ModelSocketError> {
         let mut result = String::new();
         while let Some(chunk) = self.stream.recv().await {
+            let chunk = chunk?;
             if !chunk.hidden {
                 result.push_str(&chunk.text);
             }
@@ -311,6 +371,7 @@ impl GenStream {
         let mut text = String::new();
         let mut tokens = Vec::new();
         while let Some(chunk) = self.stream.recv().await {
+            let chunk = chunk?;
             if !chunk.hidden {
                 text.push_str(&chunk.text);
                 if let Some(chunk_tokens) = chunk.tokens {

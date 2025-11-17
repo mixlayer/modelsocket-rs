@@ -87,12 +87,12 @@ impl PyBlockingModelSocketClient {
 
     #[pyo3(
         text_signature = "($self, model, /, *, tools_enabled=False, tool_prompt=None, skip_prelude=False)",
-        signature = (model, tools_enabled=None, tool_prompt=None, skip_prelude=None)
+        signature = (model, tool_prompt=None, skip_prelude=None)
     )]
     pub fn open(
         &self,
         model: &str,
-        tools_enabled: Option<bool>,
+        // tools_enabled: Option<bool>,
         tool_prompt: Option<&str>,
         skip_prelude: Option<bool>,
     ) -> PyResult<PyBlockingSeq> {
@@ -101,7 +101,7 @@ impl PyBlockingModelSocketClient {
         let seq = Python::attach(|py| {
             block_on(py, async move {
                 let mut opts = OpenOpts::default();
-                opts.tools_enabled = tools_enabled.unwrap_or(false);
+                // opts.tools_enabled = tools_enabled.unwrap_or(false);
                 opts.tool_prompt = tool_prompt.map(|s| s.to_string());
                 opts.skip_prelude = skip_prelude.unwrap_or(false);
                 client.open(model, Some(opts)).await
@@ -317,17 +317,23 @@ impl PyBlockingGenStream {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyGenEvent>>> {
+        use futures::StreamExt;
+
         let Some(stream) = self.stream.take() else {
             return Ok(None);
         };
 
         let (stream, chunk) = block_on(py, async move {
             let mut stream = stream;
-            let next = stream.next_chunk().await;
+            let next = stream.next().await;
             Ok((stream, next))
         })?;
 
         if let Some(chunk) = chunk {
+            let Ok(chunk) = chunk else {
+                return Err(map_err(chunk.unwrap_err()));
+            };
+
             let event = Py::new(py, PyGenEvent::from(chunk))?;
             self.stream = Some(stream);
             Ok(Some(event))
