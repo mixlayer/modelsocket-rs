@@ -417,8 +417,7 @@ impl PyTool {
         parameters: Option<Py<PyAny>>,
         function: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
-        let handler = function
-            .ok_or_else(|| PyTypeError::new_err("function is required"))?;
+        let handler = function.ok_or_else(|| PyTypeError::new_err("function is required"))?;
 
         let callable = handler.bind(py);
         if !callable.is_callable() {
@@ -513,9 +512,8 @@ fn parse_tool_parameters(py: Python<'_>, value: Py<PyAny>) -> PyResult<ToolParam
         .call_method1("dumps", (bound,))?
         .extract::<String>()?;
 
-    serde_json::from_str(&json).map_err(|err| {
-        PyTypeError::new_err(format!("invalid tool parameters schema: {err}"))
-    })
+    serde_json::from_str(&json)
+        .map_err(|err| PyTypeError::new_err(format!("invalid tool parameters schema: {err}")))
 }
 
 fn build_gen_opts(
