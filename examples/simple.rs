@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
         .await
         .context("generate failed")?;
 
-    utils::print_stream(stream, true, true).await?;
+    utils::print_stream(stream, args.hidden, args.colors).await?;
 
     Ok(())
 }
