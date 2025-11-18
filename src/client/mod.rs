@@ -63,6 +63,8 @@ impl ModelSocket {
         TX: Sink<MSRequest, Error = ModelSocketError> + Send + 'static,
         T: transport::MSTransport<RX, TX>,
     {
+        super::ensure_rustls_provider();
+
         let (ws_sink, ws_stream) = transport.split();
 
         let socket = Self {
