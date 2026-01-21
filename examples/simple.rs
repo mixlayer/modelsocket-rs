@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
         .context("websocket connection failed")?;
 
     let seq = socket
-        .open("meta/llama3.1-8b-instruct-free", None)
+        .open_seq("meta/llama3.1-8b-instruct-free", None)
         .await
         .context("seq open failed")?;
 

@@ -105,6 +105,20 @@ impl MSEvent {
         }
     }
 
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            MSEvent::SeqOpened { .. } => "seq_opened",
+            MSEvent::SeqAppendFinish { .. } => "seq_append_finish",
+            MSEvent::SeqGenFinish { .. } => "seq_gen_finish",
+            MSEvent::SeqForkFinish { .. } => "seq_fork_finish",
+            MSEvent::SeqText { .. } => "seq_text",
+            MSEvent::SeqToolCall { .. } => "seq_tool_call",
+            MSEvent::SeqClosed { .. } => "seq_closed",
+            MSEvent::SeqState { .. } => "seq_state",
+            MSEvent::Error { .. } => "error",
+        }
+    }
+
     pub fn seq_id(&self) -> Option<&str> {
         match self {
             MSEvent::SeqOpened { seq_id, .. } => Some(seq_id.as_str()),

@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
     opts.toolbox = Some(toolbox);
 
     let seq = socket
-        .open("qwen/qwen3-8b", Some(opts))
+        .open_seq("qwen/qwen3-8b", Some(opts))
         .await
         .context("seq open failed")?;
 

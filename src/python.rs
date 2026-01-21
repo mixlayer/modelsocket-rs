@@ -122,7 +122,7 @@ impl PyBlockingModelSocketClient {
                 opts.toolbox = toolbox;
                 opts.tool_prompt = tool_prompt.map(|s| s.to_string());
                 opts.skip_prelude = skip_prelude.unwrap_or(false);
-                client.open(model, Some(opts)).await
+                client.open_seq(model, Some(opts)).await
             })
         })?;
 
