@@ -53,15 +53,6 @@ pub enum ModelSocketError {
     Other(#[from] anyhow::Error),
 }
 
-#[derive(Clone, Debug)]
-pub enum CloseReason {
-    /// Seq was closed by the model server
-    ServerClosed,
-
-    /// Seq was closed by the client
-    ClientClosed,
-}
-
 #[derive(Clone)]
 pub struct ModelSocket {
     /// Channel for sending requests to the model server
@@ -98,7 +89,7 @@ impl ModelSocket {
         let socket_clone = socket.clone_components();
 
         tokio::spawn(async move {
-            socket_clone.read_loop(ws_stream).await;
+            socket_clone.event_recv_loop(ws_stream).await;
         });
 
         Ok(socket)
@@ -118,8 +109,8 @@ impl ModelSocket {
         }
     }
 
-    /// Reads events from the model server
-    async fn read_loop<S: Stream<Item = Result<MSEvent, ModelSocketError>> + Unpin>(
+    /// Receives events from the model server and forwards them to handler
+    async fn event_recv_loop<S: Stream<Item = Result<MSEvent, ModelSocketError>> + Unpin>(
         self,
         mut events: S,
     ) {
@@ -135,7 +126,7 @@ impl ModelSocket {
     }
 
     /// Handles events received from the model
-    #[instrument(skip(self), fields(event = ?event.event_type(), seq_id = ?event.seq_id()))]
+    #[instrument(name = "on_seq_event", skip(self), fields(event = ?event.event_type(), seq_id = ?event.seq_id()))]
     async fn on_event(&self, event: MSEvent) {
         debug!("<- {:?}", event);
         match &event {
@@ -236,7 +227,7 @@ impl ModelSocket {
         let opts = opts.unwrap_or_default();
         let tools_enabled = opts.toolbox.is_some();
 
-        self.send(MSRequest::SeqOpen {
+        self.send_request(MSRequest::SeqOpen {
             cid: cid.clone(),
             data: SeqOpenReq {
                 model: model.to_string(),
@@ -280,7 +271,7 @@ impl ModelSocket {
         Ok(seq)
     }
 
-    async fn send(&self, req: MSRequest) -> Result<(), ModelSocketError> {
+    async fn send_request(&self, req: MSRequest) -> Result<(), ModelSocketError> {
         debug!("-> {:?}", req);
         let mut sink = self.ws_sink.lock().await;
         sink.send(req).await?;

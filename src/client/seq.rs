@@ -19,7 +19,7 @@ use crate::{AppendOpts, ModelSocket, ModelSocketError};
 
 #[derive(Clone)]
 pub struct Seq {
-    /// id for this eq
+    /// id for this seq
     seq_id: String,
 
     /// model this seq is associated with
@@ -186,7 +186,7 @@ impl Seq {
                     }),
                 };
 
-                if let Err(err) = self.socket.send(response).await {
+                if let Err(err) = self.socket.send_request(response).await {
                     error!("failed to send tool return response: {}", err);
                 }
             }
@@ -207,7 +207,7 @@ impl Seq {
         cmd: SeqCommand,
     ) -> Result<(), ModelSocketError> {
         self.socket
-            .send(MSRequest::SeqCommand {
+            .send_request(MSRequest::SeqCommand {
                 cid: cid.as_ref().to_string(),
                 seq_id: self.seq_id.clone(),
                 data: cmd,
@@ -227,7 +227,7 @@ impl Seq {
         self.cmds.lock().await.insert(cid.clone(), tx);
 
         self.socket
-            .send(MSRequest::SeqCommand {
+            .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
                 seq_id: self.seq_id.clone(),
                 data: SeqCommand::Append(SeqAppendReq {
@@ -257,7 +257,7 @@ impl Seq {
         self.gen_streams.lock().await.insert(cid.clone(), stream_tx);
 
         self.socket
-            .send(MSRequest::SeqCommand {
+            .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
                 seq_id: self.seq_id.clone(),
                 data: SeqCommand::Gen(opts.map(|o| o.into()).unwrap_or_default()),
@@ -278,7 +278,7 @@ impl Seq {
         self.cmds.lock().await.insert(cid.clone(), tx);
 
         self.socket
-            .send(MSRequest::SeqCommand {
+            .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
                 seq_id: self.seq_id.clone(),
                 data: SeqCommand::Fork(SeqForkReq {}),
@@ -327,7 +327,7 @@ impl Seq {
 
         // fire and forget a close command
         self.socket
-            .send(MSRequest::SeqCommand {
+            .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
                 seq_id: self.seq_id.clone(),
                 data: SeqCommand::Close(SeqCloseReq {}),
