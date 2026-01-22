@@ -35,7 +35,7 @@ pub struct Seq {
     gen_streams: Arc<Mutex<HashMap<String, mpsc::Sender<Result<GenChunk, ModelSocketError>>>>>,
 
     /// tools active on this seq
-    toolbox: Arc<Option<Mutex<Toolbox>>>,
+    toolbox: Arc<Option<Mutex<Box<dyn Toolbox>>>>,
 
     // channel for forwarding model events to the client
     pub(crate) event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
@@ -46,7 +46,7 @@ impl Seq {
         seq_id: String,
         model: String,
         socket: ModelSocket,
-        toolbox: Arc<Option<Mutex<Toolbox>>>,
+        toolbox: Arc<Option<Mutex<Box<dyn Toolbox>>>>,
         event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
     ) -> Self {
         Self {
@@ -176,8 +176,8 @@ impl Seq {
         let results = toolbox.lock().await.call_tools(tool_calls).await;
 
         match results {
-            Ok(results) => {
-                let response = MSRequest::SeqCommand {
+            Ok(Some(results)) => {
+                let tool_return_cmd = MSRequest::SeqCommand {
                     cid: cid.to_string(),
                     seq_id: self.seq_id.clone(),
                     data: SeqCommand::ToolReturn(SeqToolReturnReq {
@@ -186,10 +186,11 @@ impl Seq {
                     }),
                 };
 
-                if let Err(err) = self.socket.send_request(response).await {
+                if let Err(err) = self.socket.send_request(tool_return_cmd).await {
                     error!("failed to send tool return response: {}", err);
                 }
             }
+            Ok(None) => {} // toolbox returned None, skip tool return command
             Err(e) => {
                 error!("failed to call tools: {}", e);
                 if let Err(err) = self.close().await {

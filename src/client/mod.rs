@@ -211,11 +211,7 @@ impl ModelSocket {
         }
     }
 
-    pub async fn open_seq(
-        &self,
-        model: &str,
-        opts: Option<OpenOpts>,
-    ) -> Result<Seq, ModelSocketError> {
+    pub async fn open(&self, model: &str, opts: Option<OpenOpts>) -> Result<Seq, ModelSocketError> {
         let cid = Uuid::new_v4().to_string();
         let (tx, mut rx) = mpsc::channel(1);
 
@@ -244,7 +240,7 @@ impl ModelSocket {
             ))
         })?;
 
-        let tool_def_prompt = opts.toolbox.as_ref().map(|t| t.tool_def_prompt());
+        let tool_def_prompt = opts.toolbox.as_ref().and_then(|t| t.tool_def_prompt());
         let toolbox = Arc::new(opts.toolbox.map(|t| Mutex::new(t)));
 
         let seq = Seq::new(
@@ -372,5 +368,5 @@ pub struct OpenOpts {
     pub event_sink: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
 
     /// Tools available for use on this sequence
-    pub toolbox: Option<Toolbox>,
+    pub toolbox: Option<Box<dyn Toolbox>>,
 }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// A ModelSocket command.
 ///
-/// All the commands that can be sent to a model socket server
+/// All the commands that can be sent to a modelsocket server
 /// from a client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "request")]

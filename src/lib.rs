@@ -2,6 +2,9 @@ pub mod protocol;
 
 use std::sync::Once;
 
+// re-export async_trait for toolbox implementation convenience
+pub use async_trait::async_trait;
+
 pub use protocol::*;
 
 #[cfg(feature = "client")]

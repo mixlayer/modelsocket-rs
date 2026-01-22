@@ -52,6 +52,7 @@ pyo3 = { version = "0.27", features = [
     "abi3-py39",
 ], optional = true }
 once_cell = { version = "1.19", optional = true }
+async-trait = "0.1.89"
 
 [dev-dependencies]
 anyhow = "1.0.100"
