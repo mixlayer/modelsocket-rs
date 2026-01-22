@@ -26,7 +26,7 @@ pub struct SimpleToolbox {
 
 impl fmt::Debug for SimpleToolbox {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Toolbox")
+        f.debug_struct("SimpleToolbox")
             .field("tools", &self.tools.keys().collect::<Vec<_>>())
             .finish()
     }
