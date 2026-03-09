@@ -126,7 +126,7 @@ impl ModelSocket {
     }
 
     /// Handles events received from the model
-    #[instrument(name = "on_seq_event", skip(self), fields(event = ?event.event_type(), seq_id = ?event.seq_id()))]
+    #[instrument(name = "on_seq_event", skip(self), fields(event = ?event.event_type(), seq_id = ?event.seq_id().unwrap_or("unknown")))]
     async fn on_event(&self, event: MSEvent) {
         debug!("<- {:?}", event);
         match &event {
@@ -229,6 +229,7 @@ impl ModelSocket {
                 model: model.to_string(),
                 tools_enabled,
                 tool_prompt: opts.tool_prompt,
+                tool_schemas: opts.tool_schemas,
                 skip_prelude: opts.skip_prelude,
             },
         })
@@ -362,6 +363,9 @@ pub struct OpenOpts {
 
     /// Skips system prompt prescribed by model authors
     pub skip_prelude: bool,
+
+    /// Optional map of tool names to JSON Schema fragments used for tool arg typing.
+    pub tool_schemas: Option<HashMap<String, serde_json::Value>>,
 
     /// Optional sink for listening to all events related
     /// to this sequence

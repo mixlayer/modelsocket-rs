@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// A ModelSocket command.
@@ -143,6 +145,9 @@ pub struct SeqOpenReq {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_prompt: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_schemas: Option<HashMap<String, serde_json::Value>>,
 
     #[serde(default)]
     pub skip_prelude: bool,
