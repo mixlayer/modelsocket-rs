@@ -11,9 +11,10 @@ use pyo3::types::{PyModule, PyType};
 use tokio::runtime::{Builder, Runtime};
 
 use crate::client::{
-    tools::{Tool, ToolDefinition, ToolParameters, Toolbox},
+    tools::{SimpleToolbox, Tool, ToolDefinition, ToolParameters},
     AppendOpts, GenChunk, GenOpts, GenStream, ModelSocket, ModelSocketError, OpenOpts, Seq,
 };
+use crate::tools::Toolbox;
 
 fn map_err(err: ModelSocketError) -> PyErr {
     PyRuntimeError::new_err(err.to_string())
@@ -108,7 +109,7 @@ impl PyBlockingModelSocketClient {
                 return None;
             }
 
-            let mut toolbox = Toolbox::new();
+            let mut toolbox = SimpleToolbox::new();
             for tool in tool_list {
                 let tool_ref = tool.borrow(py);
                 toolbox.add_tool(tool_ref.clone_tool(py));
@@ -119,7 +120,7 @@ impl PyBlockingModelSocketClient {
         let seq = Python::attach(|py| {
             block_on(py, async move {
                 let mut opts = OpenOpts::default();
-                opts.toolbox = toolbox;
+                opts.toolbox = toolbox.map(|t| Box::new(t) as Box<dyn Toolbox>);
                 opts.tool_prompt = tool_prompt.map(|s| s.to_string());
                 opts.skip_prelude = skip_prelude.unwrap_or(false);
                 client.open(model, Some(opts)).await

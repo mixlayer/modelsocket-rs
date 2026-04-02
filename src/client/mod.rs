@@ -9,11 +9,15 @@ use crate::{
 use futures::{Sink, Stream};
 use futures_util::{SinkExt, StreamExt};
 pub use seq::{GenChunk, GenStream, Seq};
-use std::{collections::HashMap, pin::Pin, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    pin::Pin,
+    sync::Arc,
+};
 use thiserror::Error;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::{protocol::Message, Error as WsError};
-use tracing::{debug, error};
+use tracing::{debug, error, instrument};
 use uuid::Uuid;
 
 #[derive(Error, Debug)]
@@ -51,9 +55,17 @@ pub enum ModelSocketError {
 
 #[derive(Clone)]
 pub struct ModelSocket {
+    /// Channel for sending requests to the model server
     ws_sink: Arc<Mutex<Pin<Box<dyn Sink<MSRequest, Error = ModelSocketError> + Send>>>>,
+
+    /// Seqs that are being opened by this socket
     opening_seqs: Arc<Mutex<HashMap<String, mpsc::Sender<Result<String, ModelSocketError>>>>>,
+
+    /// Seqs being managed by this socket
     seqs: Arc<Mutex<HashMap<String, Seq>>>,
+
+    /// Records a set of tombstoned seqs that have been closed
+    closed_seqs: Arc<RwLock<HashSet<String>>>,
 }
 
 impl ModelSocket {
@@ -71,12 +83,13 @@ impl ModelSocket {
             ws_sink: Arc::new(Mutex::new(Box::pin(ws_sink))),
             opening_seqs: Arc::new(Mutex::new(HashMap::new())),
             seqs: Arc::new(Mutex::new(HashMap::new())),
+            closed_seqs: Default::default(),
         };
 
         let socket_clone = socket.clone_components();
 
         tokio::spawn(async move {
-            socket_clone.read_loop(ws_stream).await;
+            socket_clone.event_recv_loop(ws_stream).await;
         });
 
         Ok(socket)
@@ -92,10 +105,12 @@ impl ModelSocket {
             ws_sink: self.ws_sink.clone(),
             opening_seqs: self.opening_seqs.clone(),
             seqs: self.seqs.clone(),
+            closed_seqs: self.closed_seqs.clone(),
         }
     }
 
-    async fn read_loop<S: Stream<Item = Result<MSEvent, ModelSocketError>> + Unpin>(
+    /// Receives events from the model server and forwards them to handler
+    async fn event_recv_loop<S: Stream<Item = Result<MSEvent, ModelSocketError>> + Unpin>(
         self,
         mut events: S,
     ) {
@@ -110,19 +125,30 @@ impl ModelSocket {
         }
     }
 
+    /// Handles events received from the model
+    #[instrument(name = "on_seq_event", skip(self), fields(event = ?event.event_type(), seq_id = ?event.seq_id().unwrap_or("unknown")))]
     async fn on_event(&self, event: MSEvent) {
         debug!("<- {:?}", event);
         match &event {
             MSEvent::SeqOpened { seq_id, cid } => self.on_seq_opened(seq_id, cid).await,
             MSEvent::Error { cid, message, .. } => self.on_error(cid, message).await,
             MSEvent::SeqClosed { seq_id, .. } => {
+                // delegate to seq first to allow it to clean up
                 self.forward_to_seq(&event).await;
+
+                // then clean up the seq from the socket state and remove it
+                // from seq table
                 self.on_seq_closed(seq_id).await
             }
             _ => self.forward_to_seq(&event).await,
         }
     }
 
+    async fn is_seq_closed(&self, seq_id: &str) -> bool {
+        self.closed_seqs.read().await.contains(seq_id)
+    }
+
+    /// Forwards events from the model to the approriate seq handler
     async fn forward_to_seq(&self, event: &MSEvent) {
         let seq_id = match event.seq_id() {
             Some(id) => id,
@@ -133,6 +159,11 @@ impl ModelSocket {
         };
 
         let mut seqs = self.seqs.lock().await;
+
+        if self.is_seq_closed(seq_id).await {
+            debug!(seq = seq_id, "skipping event for closed seq");
+            return;
+        }
 
         if let Some(seq) = seqs.get_mut(seq_id) {
             seq.on_event(event).await;
@@ -157,11 +188,15 @@ impl ModelSocket {
     }
 
     async fn on_seq_closed(&self, seq_id: &str) {
-        if let Some(seq) = self.seqs.lock().await.remove(seq_id) {
-            debug!(seq = seq_id, "removing seq from client state");
-            drop(seq);
+        if let Some(_seq) = self.seqs.lock().await.remove(seq_id) {
+            debug!(seq = seq_id, "removing seq from client socket state");
+            self.closed_seqs.write().await.insert(seq_id.to_owned());
         } else {
-            error!("state error: unknown seq_id {}", seq_id);
+            // if the seq was not in the seqs table and we don't have a tombstone for it,
+            // then emit an error
+            if !self.is_seq_closed(seq_id).await {
+                error!(seq_id, "unknown seq id during on close event");
+            }
         }
     }
 
@@ -169,7 +204,7 @@ impl ModelSocket {
         let mut opening_seqs = self.opening_seqs.lock().await;
         if let Some(sender) = opening_seqs.remove(cid) {
             if let Err(e) = sender.send(Ok(seq_id.to_owned())).await {
-                error!("Failed to send seq_id: {}", e);
+                error!("failed to send seq_id: {}", e);
             }
         } else {
             error!("unknown opened seq cid {}", cid);
@@ -188,12 +223,13 @@ impl ModelSocket {
         let opts = opts.unwrap_or_default();
         let tools_enabled = opts.toolbox.is_some();
 
-        self.send(MSRequest::SeqOpen {
+        self.send_request(MSRequest::SeqOpen {
             cid: cid.clone(),
             data: SeqOpenReq {
                 model: model.to_string(),
                 tools_enabled,
                 tool_prompt: opts.tool_prompt,
+                tool_schemas: opts.tool_schemas,
                 skip_prelude: opts.skip_prelude,
             },
         })
@@ -205,7 +241,7 @@ impl ModelSocket {
             ))
         })?;
 
-        let tool_def_prompt = opts.toolbox.as_ref().map(|t| t.tool_def_prompt());
+        let tool_def_prompt = opts.toolbox.as_ref().and_then(|t| t.tool_def_prompt());
         let toolbox = Arc::new(opts.toolbox.map(|t| Mutex::new(t)));
 
         let seq = Seq::new(
@@ -232,7 +268,7 @@ impl ModelSocket {
         Ok(seq)
     }
 
-    async fn send(&self, req: MSRequest) -> Result<(), ModelSocketError> {
+    async fn send_request(&self, req: MSRequest) -> Result<(), ModelSocketError> {
         debug!("-> {:?}", req);
         let mut sink = self.ws_sink.lock().await;
         sink.send(req).await?;
@@ -328,10 +364,13 @@ pub struct OpenOpts {
     /// Skips system prompt prescribed by model authors
     pub skip_prelude: bool,
 
+    /// Optional map of tool names to JSON Schema fragments used for tool arg typing.
+    pub tool_schemas: Option<HashMap<String, serde_json::Value>>,
+
     /// Optional sink for listening to all events related
     /// to this sequence
     pub event_sink: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
 
     /// Tools available for use on this sequence
-    pub toolbox: Option<Toolbox>,
+    pub toolbox: Option<Box<dyn Toolbox>>,
 }

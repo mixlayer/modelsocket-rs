@@ -19,12 +19,25 @@ use crate::{AppendOpts, ModelSocket, ModelSocketError};
 
 #[derive(Clone)]
 pub struct Seq {
+    /// id for this seq
     seq_id: String,
+
+    /// model this seq is associated with
     model: String,
+
+    /// modelsocket this seq is associated with
     socket: ModelSocket,
+
+    /// open commands waiting for a response and their return channels
     cmds: Arc<Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, ModelSocketError>>>>>,
+
+    /// open gen streams waiting for a response and their return channels
     gen_streams: Arc<Mutex<HashMap<String, mpsc::Sender<Result<GenChunk, ModelSocketError>>>>>,
-    toolbox: Arc<Option<Mutex<Toolbox>>>,
+
+    /// tools active on this seq
+    toolbox: Arc<Option<Mutex<Box<dyn Toolbox>>>>,
+
+    // channel for forwarding model events to the client
     pub(crate) event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
 }
 
@@ -33,7 +46,7 @@ impl Seq {
         seq_id: String,
         model: String,
         socket: ModelSocket,
-        toolbox: Arc<Option<Mutex<Toolbox>>>,
+        toolbox: Arc<Option<Mutex<Box<dyn Toolbox>>>>,
         event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
     ) -> Self {
         Self {
@@ -76,7 +89,7 @@ impl Seq {
                     .await
             }
             MSEvent::SeqClosed { cid, .. } => {
-                self.on_close(cid).await;
+                self.on_close_event(cid).await;
             }
             MSEvent::SeqToolCall {
                 cid, tool_calls, ..
@@ -87,21 +100,15 @@ impl Seq {
         }
     }
 
-    async fn on_close(&mut self, cid: &Option<String>) {
+    /// handle when the server has closed the seq
+    async fn on_close_event(&mut self, cid: &Option<String>) {
         if let Some(cid) = cid {
             if let Some(sender) = self.cmds.lock().await.remove(cid) {
                 let _ = sender.send(Ok(serde_json::Value::Null)).await;
             }
         }
 
-        // Clean up any resources associated with this seq
-        // TODO we probably want to send an Err frame to any pending commands/streams?
-        let mut cmds = self.cmds.lock().await;
-        cmds.clear();
-
-        let mut gen_streams = self.gen_streams.lock().await;
-        gen_streams.clear();
-
+        self.fail_cmds_with_close_error().await;
         self.event_tx = None;
     }
 
@@ -169,10 +176,8 @@ impl Seq {
         let results = toolbox.lock().await.call_tools(tool_calls).await;
 
         match results {
-            Ok(results) => {
-                // let results_json = serde_json::to_value(results).unwrap();
-
-                let response = MSRequest::SeqCommand {
+            Ok(Some(results)) => {
+                let tool_return_cmd = MSRequest::SeqCommand {
                     cid: cid.to_string(),
                     seq_id: self.seq_id.clone(),
                     data: SeqCommand::ToolReturn(SeqToolReturnReq {
@@ -181,10 +186,11 @@ impl Seq {
                     }),
                 };
 
-                if let Err(err) = self.socket.send(response).await {
+                if let Err(err) = self.socket.send_request(tool_return_cmd).await {
                     error!("failed to send tool return response: {}", err);
                 }
             }
+            Ok(None) => {} // toolbox returned None, skip tool return command
             Err(e) => {
                 error!("failed to call tools: {}", e);
                 if let Err(err) = self.close().await {
@@ -201,12 +207,8 @@ impl Seq {
         cid: S,
         cmd: SeqCommand,
     ) -> Result<(), ModelSocketError> {
-        // TODO not sure if we need a return channel, maybe make it an optional arg?
-        // let (tx, mut rx) = mpsc::channel(1);
-        // self.cmds.lock().await.insert(cid.clone(), tx);
-
         self.socket
-            .send(MSRequest::SeqCommand {
+            .send_request(MSRequest::SeqCommand {
                 cid: cid.as_ref().to_string(),
                 seq_id: self.seq_id.clone(),
                 data: cmd,
@@ -226,7 +228,7 @@ impl Seq {
         self.cmds.lock().await.insert(cid.clone(), tx);
 
         self.socket
-            .send(MSRequest::SeqCommand {
+            .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
                 seq_id: self.seq_id.clone(),
                 data: SeqCommand::Append(SeqAppendReq {
@@ -256,7 +258,7 @@ impl Seq {
         self.gen_streams.lock().await.insert(cid.clone(), stream_tx);
 
         self.socket
-            .send(MSRequest::SeqCommand {
+            .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
                 seq_id: self.seq_id.clone(),
                 data: SeqCommand::Gen(opts.map(|o| o.into()).unwrap_or_default()),
@@ -277,7 +279,7 @@ impl Seq {
         self.cmds.lock().await.insert(cid.clone(), tx);
 
         self.socket
-            .send(MSRequest::SeqCommand {
+            .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
                 seq_id: self.seq_id.clone(),
                 data: SeqCommand::Fork(SeqForkReq {}),
@@ -303,11 +305,9 @@ impl Seq {
         Ok(child_seq)
     }
 
-    pub async fn close(&self) -> Result<(), ModelSocketError> {
-        let cid = Uuid::new_v4().to_string();
-
+    /// sends an error to any outstanding commands or streams on this seq
+    async fn fail_cmds_with_close_error(&self) {
         let mut cmds = self.cmds.lock().await;
-
         // send an error to any outstanding commands on this seqs
         for (_cid, tx) in cmds.drain() {
             let _ = tx.send(Err(ModelSocketError::SeqClosed)).await;
@@ -317,27 +317,23 @@ impl Seq {
         for (_cid, tx) in gen_streams.drain() {
             let _ = tx.send(Err(ModelSocketError::SeqClosed)).await;
         }
-        drop(gen_streams);
+    }
 
-        //TODO add some kind of state marker to indicate that no more commands may
-        // be sent to this seq
+    pub async fn close(&self) -> Result<(), ModelSocketError> {
+        let cid = Uuid::new_v4().to_string();
 
-        let (tx, mut rx) = mpsc::channel(1);
-        cmds.insert(cid.clone(), tx);
+        // if the client has requested a close and there are outstanding
+        // commands or streams, send an error to them
+        self.fail_cmds_with_close_error().await;
 
-        drop(cmds);
-
+        // fire and forget a close command
         self.socket
-            .send(MSRequest::SeqCommand {
+            .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
                 seq_id: self.seq_id.clone(),
                 data: SeqCommand::Close(SeqCloseReq {}),
             })
             .await?;
-
-        rx.recv()
-            .await
-            .ok_or_else(|| ModelSocketError::Command("failed to receive response".into()))??;
 
         Ok(())
     }
@@ -379,6 +375,7 @@ impl GenStream {
                 }
             }
         }
+
         Ok((text, tokens))
     }
 }

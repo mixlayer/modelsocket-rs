@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use modelsocket::{
     client::{AppendOpts, GenOpts, ModelSocket},
-    tools::{Tool, ToolDefinition, Toolbox},
+    tools::{SimpleToolbox, Tool, ToolDefinition, Toolbox},
     OpenOpts,
 };
 use serde_json::json;
@@ -33,10 +33,10 @@ async fn main() -> Result<()> {
         .context("websocket connection failed")?;
 
     let mut opts = OpenOpts::default();
-    let mut toolbox = Toolbox::new();
+    let mut toolbox = SimpleToolbox::new();
     toolbox.add_tool(WeatherTool);
     toolbox.add_tool(CalculatorTool);
-    opts.toolbox = Some(toolbox);
+    opts.toolbox = Some(Box::new(toolbox) as Box<dyn Toolbox>);
 
     let seq = socket
         .open("qwen/qwen3-8b", Some(opts))

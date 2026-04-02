@@ -1,26 +1,38 @@
 use std::{collections::HashMap, fmt, future::Future, pin::Pin};
 
 use anyhow::Result;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{SeqToolCall, ToolResult};
 
+#[async_trait]
+pub trait Toolbox: Send + Sync + 'static + std::fmt::Debug {
+    /// Call tools and return the results. If this method returns None,
+    /// the client will not send a tool return command to the server.
+    async fn call_tools(&self, calls: &[SeqToolCall]) -> Result<Option<Vec<ToolResult>>>;
+
+    /// Return a prompt that describes the tools available to the server along
+    /// with their parameters.
+    fn tool_def_prompt(&self) -> Option<String>;
+}
+
 /// Simple toolbox that expects a string input
 /// and returns a string output. Calls tools sequentially.
-pub struct Toolbox {
+pub struct SimpleToolbox {
     tools: HashMap<String, Box<dyn Tool>>,
 }
 
-impl fmt::Debug for Toolbox {
+impl fmt::Debug for SimpleToolbox {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Toolbox")
+        f.debug_struct("SimpleToolbox")
             .field("tools", &self.tools.keys().collect::<Vec<_>>())
             .finish()
     }
 }
 
-impl Toolbox {
+impl SimpleToolbox {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
@@ -33,7 +45,7 @@ impl Toolbox {
         self.tools.insert(definition.name.clone(), tool);
     }
 
-    pub async fn call_tools(&self, calls: &[SeqToolCall]) -> Result<Vec<ToolResult>> {
+    pub async fn call_tools(&self, calls: &[SeqToolCall]) -> Result<Option<Vec<ToolResult>>> {
         let mut results = Vec::new();
 
         for call in calls {
@@ -44,7 +56,7 @@ impl Toolbox {
             });
         }
 
-        Ok(results)
+        Ok(Some(results))
     }
 
     async fn call(&self, name: &str, args: &str) -> Result<String> {
@@ -58,12 +70,25 @@ impl Toolbox {
         tool.call(args).await
     }
 
-    pub fn tool_def_prompt(&self) -> String {
-        self.tools
-            .values()
-            .map(|tool| tool_def_prompt(&tool.definition()))
-            .collect::<Vec<_>>()
-            .join("\n\n")
+    pub fn tool_def_prompt(&self) -> Option<String> {
+        Some(
+            self.tools
+                .values()
+                .map(|tool| tool_def_prompt(&tool.definition()))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
+    }
+}
+
+#[async_trait]
+impl Toolbox for SimpleToolbox {
+    async fn call_tools(&self, calls: &[SeqToolCall]) -> Result<Option<Vec<ToolResult>>> {
+        Self::call_tools(self, calls).await
+    }
+
+    fn tool_def_prompt(&self) -> Option<String> {
+        Self::tool_def_prompt(self)
     }
 }
 

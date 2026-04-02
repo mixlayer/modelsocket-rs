@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// A ModelSocket command.
 ///
-/// All the commands that can be sent to a model socket server
+/// All the commands that can be sent to a modelsocket server
 /// from a client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "request")]
@@ -105,6 +107,20 @@ impl MSEvent {
         }
     }
 
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            MSEvent::SeqOpened { .. } => "seq_opened",
+            MSEvent::SeqAppendFinish { .. } => "seq_append_finish",
+            MSEvent::SeqGenFinish { .. } => "seq_gen_finish",
+            MSEvent::SeqForkFinish { .. } => "seq_fork_finish",
+            MSEvent::SeqText { .. } => "seq_text",
+            MSEvent::SeqToolCall { .. } => "seq_tool_call",
+            MSEvent::SeqClosed { .. } => "seq_closed",
+            MSEvent::SeqState { .. } => "seq_state",
+            MSEvent::Error { .. } => "error",
+        }
+    }
+
     pub fn seq_id(&self) -> Option<&str> {
         match self {
             MSEvent::SeqOpened { seq_id, .. } => Some(seq_id.as_str()),
@@ -129,6 +145,9 @@ pub struct SeqOpenReq {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_prompt: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_schemas: Option<HashMap<String, serde_json::Value>>,
 
     #[serde(default)]
     pub skip_prelude: bool,
