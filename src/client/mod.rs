@@ -293,6 +293,8 @@ pub struct GenOpts {
     pub top_k: Option<i32>,
     pub repeat_penalty: Option<f32>,
     pub seed: Option<u64>,
+    pub json_schema: Option<serde_json::Value>,
+    pub json_schema_strict: Option<bool>,
 }
 
 impl GenOpts {
@@ -331,6 +333,8 @@ impl Into<SeqGenReq> for GenOpts {
             top_k: self.top_k,
             repeat_penalty: self.repeat_penalty,
             seed: self.seed,
+            json_schema: self.json_schema,
+            json_schema_strict: self.json_schema_strict,
             ..Default::default()
         }
     }
