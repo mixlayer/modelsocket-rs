@@ -225,6 +225,10 @@ pub struct SeqGenReq {
     pub prefill_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_schema: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_schema_strict: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
