@@ -229,6 +229,10 @@ pub struct SeqGenReq {
     pub json_schema: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub json_schema_strict: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -295,6 +295,8 @@ pub struct GenOpts {
     pub seed: Option<u64>,
     pub json_schema: Option<serde_json::Value>,
     pub json_schema_strict: Option<bool>,
+    pub frequency_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
 }
 
 impl GenOpts {
@@ -335,6 +337,8 @@ impl Into<SeqGenReq> for GenOpts {
             seed: self.seed,
             json_schema: self.json_schema,
             json_schema_strict: self.json_schema_strict,
+            frequency_penalty: self.frequency_penalty,
+            presence_penalty: self.presence_penalty,
             ..Default::default()
         }
     }

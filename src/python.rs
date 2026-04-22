@@ -151,7 +151,7 @@ impl PyBlockingSeq {
     }
 
     #[pyo3(
-        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None)",
+        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None)",
         signature = (
             role=None,
             stop_strings=None,
@@ -162,7 +162,9 @@ impl PyBlockingSeq {
             top_p=None,
             top_k=None,
             repeat_penalty=None,
-            seed=None
+            seed=None,
+            frequency_penalty=None,
+            presence_penalty=None
         )
     )]
     pub fn gen_text(
@@ -177,6 +179,8 @@ impl PyBlockingSeq {
         top_k: Option<i32>,
         repeat_penalty: Option<f32>,
         seed: Option<u64>,
+        frequency_penalty: Option<f32>,
+        presence_penalty: Option<f32>,
     ) -> PyResult<String> {
         let seq = self.inner.clone();
 
@@ -193,6 +197,8 @@ impl PyBlockingSeq {
                     top_k,
                     repeat_penalty,
                     seed,
+                    frequency_penalty,
+                    presence_penalty,
                 );
                 let stream = seq.generate(Some(opts)).await?;
                 stream.text().await
@@ -528,6 +534,8 @@ fn build_gen_opts(
     top_k: Option<i32>,
     repeat_penalty: Option<f32>,
     seed: Option<u64>,
+    frequency_penalty: Option<f32>,
+    presence_penalty: Option<f32>,
 ) -> GenOpts {
     let mut opts = GenOpts::default();
     opts.role = role.map(|r| r.to_string());
@@ -540,6 +548,8 @@ fn build_gen_opts(
     opts.top_k = top_k;
     opts.repeat_penalty = repeat_penalty;
     opts.seed = seed;
+    opts.frequency_penalty = frequency_penalty;
+    opts.presence_penalty = presence_penalty;
     opts
 }
 
