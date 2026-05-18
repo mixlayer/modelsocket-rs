@@ -79,6 +79,8 @@ pub enum MSEvent {
         cid: Option<String>,
         seq_id: String,
         input_tokens: u32,
+        #[serde(default)]
+        cached_input_tokens: u32,
         output_tokens: u32,
         duration_ms: u64,
         error: Option<String>,
