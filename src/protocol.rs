@@ -239,6 +239,8 @@ pub struct SeqGenReq {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     pub result: String,
 }
@@ -265,7 +267,7 @@ pub struct SeqToolCall {
 
 #[cfg(test)]
 mod tests {
-    use super::{MSEvent, SeqToolCall};
+    use super::{MSEvent, SeqToolCall, SeqToolReturnReq, ToolResult};
 
     #[test]
     fn seq_tool_call_deserializes_without_id() {
@@ -323,5 +325,57 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].id, None);
         assert_eq!(tool_calls[0].name, "search");
+    }
+
+    #[test]
+    fn tool_result_deserializes_without_id() {
+        let json = r#"{"name":"search","result":"{\"hits\":3}"}"#;
+        let result: ToolResult = serde_json::from_str(json).unwrap();
+
+        assert_eq!(result.id, None);
+        assert_eq!(result.name, "search");
+        assert_eq!(result.result, r#"{"hits":3}"#);
+    }
+
+    #[test]
+    fn tool_result_round_trips_with_id() {
+        let result = ToolResult {
+            id: Some("functions.search:0".to_string()),
+            name: "search".to_string(),
+            result: r#"{"hits":3}"#.to_string(),
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains(r#""id":"functions.search:0""#));
+
+        let round_trip: ToolResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.id, Some("functions.search:0".to_string()));
+        assert_eq!(round_trip.name, "search");
+        assert_eq!(round_trip.result, r#"{"hits":3}"#);
+    }
+
+    #[test]
+    fn tool_result_omits_absent_id() {
+        let result = ToolResult {
+            id: None,
+            name: "search".to_string(),
+            result: r#"{"hits":3}"#.to_string(),
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains(r#""id""#));
+    }
+
+    #[test]
+    fn tool_return_deserializes_legacy_results_without_id() {
+        let json = r#"{
+            "results":[{"name":"search","result":"{\"hits\":3}"}],
+            "gen_opts":{}
+        }"#;
+
+        let req: SeqToolReturnReq = serde_json::from_str(json).unwrap();
+        assert_eq!(req.results.len(), 1);
+        assert_eq!(req.results[0].id, None);
+        assert_eq!(req.results[0].name, "search");
     }
 }

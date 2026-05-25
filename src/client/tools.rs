@@ -51,6 +51,7 @@ impl SimpleToolbox {
         for call in calls {
             let result = self.call(call.name.as_str(), call.args.as_str()).await?;
             results.push(ToolResult {
+                id: call.id.clone(),
                 name: call.name.clone(),
                 result,
             });
