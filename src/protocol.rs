@@ -298,8 +298,6 @@ pub struct SeqToolCall {
     pub name: String,
     pub args: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 }
 
