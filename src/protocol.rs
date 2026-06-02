@@ -28,6 +28,7 @@ pub enum SeqCommand {
     Close(SeqCloseReq),
     Append(SeqAppendReq),
     Gen(SeqGenReq),
+    Embed(SeqEmbedReq),
     ToolReturn(SeqToolReturnReq),
     Fork(SeqForkReq),
 }
@@ -52,6 +53,18 @@ pub enum MSEvent {
     SeqGenFinish {
         seq_id: String,
         cid: String,
+    },
+    SeqEmbedding {
+        seq_id: String,
+        cid: String,
+        index: u32,
+        embedding: Vec<f32>,
+        input_tokens: u32,
+    },
+    SeqEmbedFinish {
+        seq_id: String,
+        cid: String,
+        prompt_tokens: u32,
     },
     SeqForkFinish {
         seq_id: String,
@@ -128,6 +141,8 @@ impl MSEvent {
             MSEvent::SeqOpened { cid, .. } => Some(cid.as_str()),
             MSEvent::SeqAppendFinish { cid, .. } => Some(cid.as_str()),
             MSEvent::SeqGenFinish { cid, .. } => Some(cid.as_str()),
+            MSEvent::SeqEmbedding { cid, .. } => Some(cid.as_str()),
+            MSEvent::SeqEmbedFinish { cid, .. } => Some(cid.as_str()),
             MSEvent::SeqForkFinish { cid, .. } => Some(cid.as_str()),
             MSEvent::SeqText { cid, .. } => Some(cid.as_str()),
             MSEvent::SeqToolCall { cid, .. } => Some(cid.as_str()),
@@ -146,6 +161,8 @@ impl MSEvent {
             MSEvent::SeqOpened { .. } => "seq_opened",
             MSEvent::SeqAppendFinish { .. } => "seq_append_finish",
             MSEvent::SeqGenFinish { .. } => "seq_gen_finish",
+            MSEvent::SeqEmbedding { .. } => "seq_embedding",
+            MSEvent::SeqEmbedFinish { .. } => "seq_embed_finish",
             MSEvent::SeqForkFinish { .. } => "seq_fork_finish",
             MSEvent::SeqText { .. } => "seq_text",
             MSEvent::SeqToolCall { .. } => "seq_tool_call",
@@ -164,6 +181,8 @@ impl MSEvent {
             MSEvent::SeqOpened { seq_id, .. } => Some(seq_id.as_str()),
             MSEvent::SeqAppendFinish { seq_id, .. } => Some(seq_id.as_str()),
             MSEvent::SeqGenFinish { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqEmbedding { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqEmbedFinish { seq_id, .. } => Some(seq_id.as_str()),
             MSEvent::SeqForkFinish { seq_id, .. } => Some(seq_id.as_str()),
             MSEvent::SeqText { seq_id, .. } => Some(seq_id.as_str()),
             MSEvent::SeqToolCall { seq_id, .. } => Some(seq_id.as_str()),
@@ -275,6 +294,22 @@ pub struct SeqGenReq {
     pub frequency_penalty: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingInput {
+    Text(String),
+    Tokens(Vec<u32>),
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct SeqEmbedReq {
+    pub inputs: Vec<EmbeddingInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalize: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

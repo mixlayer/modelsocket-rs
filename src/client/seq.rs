@@ -1,5 +1,8 @@
 use crate::{
-    protocol::{MSEvent, MSRequest, SeqAppendReq, SeqCloseReq, SeqCommand, SeqForkReq, SeqGenReq},
+    protocol::{
+        EmbeddingInput, MSEvent, MSRequest, SeqAppendReq, SeqCloseReq, SeqCommand, SeqEmbedReq,
+        SeqForkReq, SeqGenReq,
+    },
     tools::Toolbox,
     SeqToolCall, SeqToolReturnReq,
 };
@@ -34,6 +37,9 @@ pub struct Seq {
     /// open gen streams waiting for a response and their return channels
     gen_streams: Arc<Mutex<HashMap<String, mpsc::Sender<Result<GenChunk, ModelSocketError>>>>>,
 
+    /// open embedding commands waiting for a complete batch response
+    embed_cmds: Arc<Mutex<HashMap<String, EmbedCommandState>>>,
+
     /// tools active on this seq
     toolbox: Arc<Option<Mutex<Box<dyn Toolbox>>>>,
 
@@ -55,6 +61,7 @@ impl Seq {
             socket,
             cmds: Arc::new(Mutex::new(HashMap::new())),
             gen_streams: Arc::new(Mutex::new(HashMap::new())),
+            embed_cmds: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
             toolbox,
         }
@@ -75,6 +82,19 @@ impl Seq {
         match event {
             MSEvent::SeqAppendFinish { cid, .. } => self.on_append_finished(cid).await,
             MSEvent::SeqGenFinish { cid, .. } => self.on_gen_finished(cid).await,
+            MSEvent::SeqEmbedding {
+                cid,
+                index,
+                embedding,
+                input_tokens,
+                ..
+            } => {
+                self.on_embedding(cid, *index, embedding.clone(), *input_tokens)
+                    .await
+            }
+            MSEvent::SeqEmbedFinish {
+                cid, prompt_tokens, ..
+            } => self.on_embed_finished(cid, *prompt_tokens).await,
             MSEvent::SeqForkFinish {
                 cid, child_seq_id, ..
             } => self.on_fork_finished(cid, child_seq_id).await,
@@ -99,6 +119,11 @@ impl Seq {
             | MSEvent::SeqToolCallEnd { .. }
             | MSEvent::SeqToolCallAborted { .. }
             | MSEvent::SeqState { .. } => {}
+            MSEvent::Error { cid, message, .. } => {
+                if let Some(cid) = cid {
+                    self.on_command_error(cid, message).await;
+                }
+            }
             _ => {
                 warn!("unhandled event in seq: {:?}", event);
             }
@@ -142,9 +167,84 @@ impl Seq {
         }
     }
 
+    async fn on_embedding(
+        &mut self,
+        cid: &str,
+        index: u32,
+        embedding: Vec<f32>,
+        input_tokens: u32,
+    ) {
+        let mut embed_cmds = self.embed_cmds.lock().await;
+        let Some(state) = embed_cmds.get_mut(cid) else {
+            warn!("received embedding for unknown cid: {}", cid);
+            return;
+        };
+
+        let index = index as usize;
+        if index >= state.embeddings.len() {
+            warn!(
+                cid,
+                index,
+                len = state.embeddings.len(),
+                "received embedding index out of bounds"
+            );
+            return;
+        }
+
+        state.embeddings[index] = Some(embedding);
+        state.input_tokens[index] = input_tokens;
+    }
+
+    async fn on_embed_finished(&mut self, cid: &str, prompt_tokens: u32) {
+        let Some(state) = self.embed_cmds.lock().await.remove(cid) else {
+            warn!("received embed finish for unknown cid: {}", cid);
+            return;
+        };
+
+        let mut embeddings = Vec::with_capacity(state.embeddings.len());
+        for (idx, embedding) in state.embeddings.into_iter().enumerate() {
+            let Some(embedding) = embedding else {
+                let _ = state
+                    .sender
+                    .send(Err(ModelSocketError::Protocol(format!(
+                        "missing embedding result for index {}",
+                        idx
+                    ))))
+                    .await;
+                return;
+            };
+            embeddings.push(embedding);
+        }
+
+        let _ = state
+            .sender
+            .send(Ok(EmbeddingResult {
+                embeddings,
+                input_tokens: state.input_tokens,
+                prompt_tokens,
+            }))
+            .await;
+    }
+
     async fn on_append_finished(&mut self, cid: &str) {
         if let Some(sender) = self.cmds.lock().await.remove(cid) {
             let _ = sender.send(Ok(serde_json::Value::Null)).await;
+        }
+    }
+
+    async fn on_command_error(&mut self, cid: &str, message: &str) {
+        let err = || ModelSocketError::Command(message.to_string());
+
+        if let Some(sender) = self.cmds.lock().await.remove(cid) {
+            let _ = sender.send(Err(err())).await;
+        }
+
+        if let Some(sender) = self.gen_streams.lock().await.remove(cid) {
+            let _ = sender.send(Err(err())).await;
+        }
+
+        if let Some(state) = self.embed_cmds.lock().await.remove(cid) {
+            let _ = state.sender.send(Err(err())).await;
         }
     }
 
@@ -310,6 +410,41 @@ impl Seq {
         Ok(child_seq)
     }
 
+    pub async fn embed(
+        &self,
+        inputs: Vec<EmbeddingInput>,
+        dimensions: Option<u32>,
+        normalize: Option<bool>,
+    ) -> Result<EmbeddingResult, ModelSocketError> {
+        let cid = Uuid::new_v4().to_string();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        self.embed_cmds.lock().await.insert(
+            cid.clone(),
+            EmbedCommandState {
+                embeddings: vec![None; inputs.len()],
+                input_tokens: vec![0; inputs.len()],
+                sender: tx,
+            },
+        );
+
+        self.socket
+            .send_request(MSRequest::SeqCommand {
+                cid,
+                seq_id: self.seq_id.clone(),
+                data: SeqCommand::Embed(SeqEmbedReq {
+                    inputs,
+                    dimensions,
+                    normalize,
+                }),
+            })
+            .await?;
+
+        rx.recv().await.ok_or_else(|| {
+            ModelSocketError::Command("failed to receive embedding response".into())
+        })?
+    }
+
     /// sends an error to any outstanding commands or streams on this seq
     async fn fail_cmds_with_close_error(&self) {
         let mut cmds = self.cmds.lock().await;
@@ -321,6 +456,11 @@ impl Seq {
         let mut gen_streams = self.gen_streams.lock().await;
         for (_cid, tx) in gen_streams.drain() {
             let _ = tx.send(Err(ModelSocketError::SeqClosed)).await;
+        }
+
+        let mut embed_cmds = self.embed_cmds.lock().await;
+        for (_cid, state) in embed_cmds.drain() {
+            let _ = state.sender.send(Err(ModelSocketError::SeqClosed)).await;
         }
     }
 
@@ -390,4 +530,17 @@ pub struct GenChunk {
     pub text: String,
     pub hidden: bool,
     pub tokens: Option<Vec<u32>>,
+}
+
+struct EmbedCommandState {
+    embeddings: Vec<Option<Vec<f32>>>,
+    input_tokens: Vec<u32>,
+    sender: mpsc::Sender<Result<EmbeddingResult, ModelSocketError>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingResult {
+    pub embeddings: Vec<Vec<f32>>,
+    pub input_tokens: Vec<u32>,
+    pub prompt_tokens: u32,
 }
