@@ -39,6 +39,7 @@ pub enum SeqCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "event")]
+#[non_exhaustive]
 pub enum MSEvent {
     SeqOpened {
         seq_id: String,
@@ -70,6 +71,33 @@ pub enum MSEvent {
         seq_id: String,
         cid: String,
         tool_calls: Vec<SeqToolCall>,
+    },
+    SeqToolCallStart {
+        seq_id: String,
+        cid: String,
+        index: u32,
+        name: String,
+        id: Option<String>,
+    },
+    SeqToolCallArgsChunk {
+        seq_id: String,
+        cid: String,
+        index: u32,
+        fragment: String,
+        id: Option<String>,
+    },
+    SeqToolCallEnd {
+        seq_id: String,
+        cid: String,
+        index: u32,
+        args: String
+    },
+    SeqToolCallAborted {
+        seq_id: String,
+        cid: String,
+        index: u32,
+        reason: String,
+        id: Option<String>,
     },
     SeqState {
         seq_id: String,
@@ -103,6 +131,10 @@ impl MSEvent {
             MSEvent::SeqForkFinish { cid, .. } => Some(cid.as_str()),
             MSEvent::SeqText { cid, .. } => Some(cid.as_str()),
             MSEvent::SeqToolCall { cid, .. } => Some(cid.as_str()),
+            MSEvent::SeqToolCallStart { cid, .. } => Some(cid.as_str()),
+            MSEvent::SeqToolCallArgsChunk { cid, .. } => Some(cid.as_str()),
+            MSEvent::SeqToolCallEnd { cid, .. } => Some(cid.as_str()),
+            MSEvent::SeqToolCallAborted { cid, .. } => Some(cid.as_str()),
             MSEvent::SeqClosed { cid, .. } => cid.as_ref().map(|s| s.as_str()),
             MSEvent::Error { cid, .. } => cid.as_ref().map(|s| s.as_str()),
             _ => None,
@@ -117,6 +149,10 @@ impl MSEvent {
             MSEvent::SeqForkFinish { .. } => "seq_fork_finish",
             MSEvent::SeqText { .. } => "seq_text",
             MSEvent::SeqToolCall { .. } => "seq_tool_call",
+            MSEvent::SeqToolCallStart { .. } => "seq_tool_call_start",
+            MSEvent::SeqToolCallArgsChunk { .. } => "seq_tool_call_args_chunk",
+            MSEvent::SeqToolCallEnd { .. } => "seq_tool_call_end",
+            MSEvent::SeqToolCallAborted { .. } => "seq_tool_call_aborted",
             MSEvent::SeqClosed { .. } => "seq_closed",
             MSEvent::SeqState { .. } => "seq_state",
             MSEvent::Error { .. } => "error",
@@ -131,6 +167,10 @@ impl MSEvent {
             MSEvent::SeqForkFinish { seq_id, .. } => Some(seq_id.as_str()),
             MSEvent::SeqText { seq_id, .. } => Some(seq_id.as_str()),
             MSEvent::SeqToolCall { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqToolCallStart { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqToolCallArgsChunk { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqToolCallEnd { seq_id, .. } => Some(seq_id.as_str()),
+            MSEvent::SeqToolCallAborted { seq_id, .. } => Some(seq_id.as_str()),
             MSEvent::SeqState { seq_id, .. } => Some(seq_id.as_str()),
             MSEvent::SeqClosed { seq_id, .. } => Some(seq_id.as_str()),
             MSEvent::Error { seq_id, .. } => seq_id.as_ref().map(|s| s.as_str()),
