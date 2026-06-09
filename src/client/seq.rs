@@ -94,6 +94,11 @@ impl Seq {
             MSEvent::SeqToolCall {
                 cid, tool_calls, ..
             } => self.on_tool_call(cid, tool_calls).await,
+            MSEvent::SeqToolCallStart { .. }
+            | MSEvent::SeqToolCallArgsChunk { .. }
+            | MSEvent::SeqToolCallEnd { .. }
+            | MSEvent::SeqToolCallAborted { .. }
+            | MSEvent::SeqState { .. } => {}
             _ => {
                 warn!("unhandled event in seq: {:?}", event);
             }
