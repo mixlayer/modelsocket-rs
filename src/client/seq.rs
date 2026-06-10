@@ -1,7 +1,7 @@
 use crate::{
     protocol::{
-        EmbeddingInput, MSEvent, MSRequest, SeqAppendReq, SeqCloseReq, SeqCommand, SeqEmbedReq,
-        SeqForkReq, SeqGenReq,
+        EmbeddingInput, EmbeddingInputType, MSEvent, MSRequest, SeqAppendReq, SeqCloseReq,
+        SeqCommand, SeqEmbedReq, SeqForkReq, SeqGenReq,
     },
     tools::Toolbox,
     SeqToolCall, SeqToolReturnReq,
@@ -413,11 +413,11 @@ impl Seq {
     pub async fn embed(
         &self,
         inputs: Vec<EmbeddingInput>,
-        dimensions: Option<u32>,
-        normalize: Option<bool>,
+        opts: Option<EmbedOpts>,
     ) -> Result<EmbeddingResult, ModelSocketError> {
         let cid = Uuid::new_v4().to_string();
         let (tx, mut rx) = mpsc::channel(1);
+        let opts = opts.unwrap_or_default();
 
         self.embed_cmds.lock().await.insert(
             cid.clone(),
@@ -434,8 +434,11 @@ impl Seq {
                 seq_id: self.seq_id.clone(),
                 data: SeqCommand::Embed(SeqEmbedReq {
                     inputs,
-                    dimensions,
-                    normalize,
+                    input_type: opts.input_type,
+                    instruction: opts.instruction,
+                    dimensions: opts.dimensions,
+                    normalize: opts.normalize,
+                    truncate: opts.truncate,
                 }),
             })
             .await?;
@@ -482,6 +485,15 @@ impl Seq {
 
         Ok(())
     }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct EmbedOpts {
+    pub input_type: Option<EmbeddingInputType>,
+    pub instruction: Option<String>,
+    pub dimensions: Option<u32>,
+    pub normalize: Option<bool>,
+    pub truncate: Option<bool>,
 }
 
 pub struct GenStream {

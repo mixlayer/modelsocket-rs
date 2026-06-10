@@ -8,7 +8,7 @@ use crate::{
 };
 use futures::{Sink, Stream};
 use futures_util::{SinkExt, StreamExt};
-pub use seq::{EmbeddingResult, GenChunk, GenStream, Seq};
+pub use seq::{EmbedOpts, EmbeddingResult, GenChunk, GenStream, Seq};
 use std::{
     collections::{HashMap, HashSet},
     pin::Pin,
