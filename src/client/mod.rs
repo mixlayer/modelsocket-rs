@@ -54,6 +54,18 @@ pub enum ModelSocketError {
 }
 
 #[derive(Clone)]
+struct ModelSocketEventHandler {
+    /// Seqs that are being opened by this socket
+    opening_seqs: Arc<Mutex<HashMap<String, mpsc::Sender<Result<String, ModelSocketError>>>>>,
+
+    /// Seqs being managed by this socket
+    seqs: Arc<Mutex<HashMap<String, Seq>>>,
+
+    /// Records a set of tombstoned seqs that have been closed
+    closed_seqs: Arc<RwLock<HashSet<String>>>,
+}
+
+#[derive(Clone)]
 pub struct ModelSocket {
     /// Channel for sending requests to the model server
     ws_sink: Arc<Mutex<Pin<Box<dyn Sink<MSRequest, Error = ModelSocketError> + Send>>>>,
@@ -86,10 +98,10 @@ impl ModelSocket {
             closed_seqs: Default::default(),
         };
 
-        let socket_clone = socket.clone_components();
+        let event_handler = socket.event_handler();
 
         tokio::spawn(async move {
-            socket_clone.event_recv_loop(ws_stream).await;
+            event_handler.event_recv_loop(ws_stream).await;
         });
 
         Ok(socket)
@@ -109,6 +121,16 @@ impl ModelSocket {
         }
     }
 
+    fn event_handler(&self) -> ModelSocketEventHandler {
+        ModelSocketEventHandler {
+            opening_seqs: self.opening_seqs.clone(),
+            seqs: self.seqs.clone(),
+            closed_seqs: self.closed_seqs.clone(),
+        }
+    }
+}
+
+impl ModelSocketEventHandler {
     /// Receives events from the model server and forwards them to handler
     async fn event_recv_loop<S: Stream<Item = Result<MSEvent, ModelSocketError>> + Unpin>(
         self,
@@ -210,7 +232,9 @@ impl ModelSocket {
             error!("unknown opened seq cid {}", cid);
         }
     }
+}
 
+impl ModelSocket {
     pub async fn open(&self, model: &str, opts: Option<OpenOpts>) -> Result<Seq, ModelSocketError> {
         let cid = Uuid::new_v4().to_string();
         let (tx, mut rx) = mpsc::channel(1);
@@ -381,4 +405,87 @@ pub struct OpenOpts {
 
     /// Tools available for use on this sequence
     pub toolbox: Option<Box<dyn Toolbox>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::task::{Context, Poll};
+    use tokio::time::{timeout, Duration};
+
+    struct ChannelTransport {
+        requests: tokio::sync::mpsc::UnboundedSender<MSRequest>,
+        events: tokio::sync::mpsc::UnboundedReceiver<Result<MSEvent, ModelSocketError>>,
+    }
+
+    struct RequestSink(tokio::sync::mpsc::UnboundedSender<MSRequest>);
+
+    impl Sink<MSRequest> for RequestSink {
+        type Error = ModelSocketError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: MSRequest) -> Result<(), Self::Error> {
+            self.0
+                .send(item)
+                .map_err(|_| ModelSocketError::State("request receiver closed".to_string()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct EventStream(tokio::sync::mpsc::UnboundedReceiver<Result<MSEvent, ModelSocketError>>);
+
+    impl Stream for EventStream {
+        type Item = Result<MSEvent, ModelSocketError>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.0.poll_recv(cx)
+        }
+    }
+
+    impl transport::MSTransport<EventStream, RequestSink> for ChannelTransport {
+        fn split(self) -> (RequestSink, EventStream) {
+            (RequestSink(self.requests), EventStream(self.events))
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_socket_closes_request_channel_while_event_stream_is_open() {
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let socket = ModelSocket::new(ChannelTransport {
+            requests: request_tx,
+            events: event_rx,
+        })
+        .unwrap();
+
+        drop(socket);
+
+        let closed = timeout(Duration::from_millis(100), request_rx.recv())
+            .await
+            .expect("request receiver should observe closure after dropping ModelSocket");
+
+        assert!(closed.is_none());
+
+        drop(event_tx);
+    }
 }
