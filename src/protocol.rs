@@ -90,7 +90,7 @@ pub enum MSEvent {
         seq_id: String,
         cid: String,
         index: u32,
-        args: String
+        args: String,
     },
     SeqToolCallAborted {
         seq_id: String,
@@ -275,6 +275,10 @@ pub struct SeqGenReq {
     pub frequency_penalty: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_buffer_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_buffer_timeout_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -307,7 +311,41 @@ pub struct SeqToolCall {
 
 #[cfg(test)]
 mod tests {
-    use super::{MSEvent, SeqToolCall, SeqToolReturnReq, ToolResult};
+    use super::{MSEvent, SeqGenReq, SeqToolCall, SeqToolReturnReq, ToolResult};
+
+    #[test]
+    fn seq_gen_req_omits_absent_stream_buffer_fields() {
+        let json = serde_json::to_string(&SeqGenReq::default()).unwrap();
+
+        assert!(!json.contains("stream_buffer_tokens"));
+        assert!(!json.contains("stream_buffer_timeout_ms"));
+    }
+
+    #[test]
+    fn seq_gen_req_deserializes_without_stream_buffer_fields() {
+        let req: SeqGenReq = serde_json::from_str(r#"{"max_tokens":16}"#).unwrap();
+
+        assert_eq!(req.max_tokens, Some(16));
+        assert_eq!(req.stream_buffer_tokens, None);
+        assert_eq!(req.stream_buffer_timeout_ms, None);
+    }
+
+    #[test]
+    fn seq_gen_req_round_trips_stream_buffer_fields() {
+        let req = SeqGenReq {
+            stream_buffer_tokens: Some(8),
+            stream_buffer_timeout_ms: Some(25),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""stream_buffer_tokens":8"#));
+        assert!(json.contains(r#""stream_buffer_timeout_ms":25"#));
+
+        let round_trip: SeqGenReq = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.stream_buffer_tokens, Some(8));
+        assert_eq!(round_trip.stream_buffer_timeout_ms, Some(25));
+    }
 
     #[test]
     fn seq_tool_call_deserializes_without_id() {

@@ -151,7 +151,7 @@ impl PyBlockingSeq {
     }
 
     #[pyo3(
-        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None)",
+        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None, stream_buffer_tokens=None, stream_buffer_timeout_ms=None)",
         signature = (
             role=None,
             stop_strings=None,
@@ -164,7 +164,9 @@ impl PyBlockingSeq {
             repeat_penalty=None,
             seed=None,
             frequency_penalty=None,
-            presence_penalty=None
+            presence_penalty=None,
+            stream_buffer_tokens=None,
+            stream_buffer_timeout_ms=None
         )
     )]
     pub fn gen_text(
@@ -181,6 +183,8 @@ impl PyBlockingSeq {
         seed: Option<u64>,
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
+        stream_buffer_tokens: Option<u32>,
+        stream_buffer_timeout_ms: Option<u32>,
     ) -> PyResult<String> {
         let seq = self.inner.clone();
 
@@ -199,6 +203,8 @@ impl PyBlockingSeq {
                     seed,
                     frequency_penalty,
                     presence_penalty,
+                    stream_buffer_tokens,
+                    stream_buffer_timeout_ms,
                 );
                 let stream = seq.generate(Some(opts)).await?;
                 stream.text().await
@@ -207,7 +213,7 @@ impl PyBlockingSeq {
     }
 
     #[pyo3(
-        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None)",
+        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None, stream_buffer_tokens=None, stream_buffer_timeout_ms=None)",
         signature = (
             role=None,
             stop_strings=None,
@@ -220,7 +226,9 @@ impl PyBlockingSeq {
             repeat_penalty=None,
             seed=None,
             frequency_penalty=None,
-            presence_penalty=None
+            presence_penalty=None,
+            stream_buffer_tokens=None,
+            stream_buffer_timeout_ms=None
         )
     )]
     pub fn gen_text_and_tokens(
@@ -237,6 +245,8 @@ impl PyBlockingSeq {
         seed: Option<u64>,
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
+        stream_buffer_tokens: Option<u32>,
+        stream_buffer_timeout_ms: Option<u32>,
     ) -> PyResult<(String, Vec<u32>)> {
         let seq = self.inner.clone();
 
@@ -255,6 +265,8 @@ impl PyBlockingSeq {
                     seed,
                     frequency_penalty,
                     presence_penalty,
+                    stream_buffer_tokens,
+                    stream_buffer_timeout_ms,
                 );
                 let stream = seq.generate(Some(opts)).await?;
                 stream.text_and_tokens().await
@@ -263,7 +275,7 @@ impl PyBlockingSeq {
     }
 
     #[pyo3(
-        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None)",
+        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None, stream_buffer_tokens=None, stream_buffer_timeout_ms=None)",
         signature = (
             role=None,
             stop_strings=None,
@@ -276,7 +288,9 @@ impl PyBlockingSeq {
             repeat_penalty=None,
             seed=None,
             frequency_penalty=None,
-            presence_penalty=None
+            presence_penalty=None,
+            stream_buffer_tokens=None,
+            stream_buffer_timeout_ms=None
         )
     )]
     pub fn gen_text_stream(
@@ -294,6 +308,8 @@ impl PyBlockingSeq {
         seed: Option<u64>,
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
+        stream_buffer_tokens: Option<u32>,
+        stream_buffer_timeout_ms: Option<u32>,
     ) -> PyResult<Py<PyBlockingGenStream>> {
         let seq = self.inner.clone();
 
@@ -311,6 +327,8 @@ impl PyBlockingSeq {
                 seed,
                 frequency_penalty,
                 presence_penalty,
+                stream_buffer_tokens,
+                stream_buffer_timeout_ms,
             );
             seq.generate(Some(opts)).await
         })?;
@@ -548,6 +566,8 @@ fn build_gen_opts(
     seed: Option<u64>,
     frequency_penalty: Option<f32>,
     presence_penalty: Option<f32>,
+    stream_buffer_tokens: Option<u32>,
+    stream_buffer_timeout_ms: Option<u32>,
 ) -> GenOpts {
     let mut opts = GenOpts::default();
     opts.role = role.map(|r| r.to_string());
@@ -562,6 +582,8 @@ fn build_gen_opts(
     opts.seed = seed;
     opts.frequency_penalty = frequency_penalty;
     opts.presence_penalty = presence_penalty;
+    opts.stream_buffer_tokens = stream_buffer_tokens;
+    opts.stream_buffer_timeout_ms = stream_buffer_timeout_ms;
     opts
 }
 

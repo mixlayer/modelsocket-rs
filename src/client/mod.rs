@@ -321,6 +321,8 @@ pub struct GenOpts {
     pub json_schema_strict: Option<bool>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+    pub stream_buffer_tokens: Option<u32>,
+    pub stream_buffer_timeout_ms: Option<u32>,
 }
 
 impl GenOpts {
@@ -363,6 +365,8 @@ impl Into<SeqGenReq> for GenOpts {
             json_schema_strict: self.json_schema_strict,
             frequency_penalty: self.frequency_penalty,
             presence_penalty: self.presence_penalty,
+            stream_buffer_tokens: self.stream_buffer_tokens,
+            stream_buffer_timeout_ms: self.stream_buffer_timeout_ms,
             ..Default::default()
         }
     }
