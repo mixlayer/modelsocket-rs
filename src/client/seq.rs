@@ -122,6 +122,8 @@ impl Seq {
             MSEvent::Error { cid, message, .. } => {
                 if let Some(cid) = cid {
                     self.on_command_error(cid, message).await;
+                } else {
+                    self.on_seq_error(message).await;
                 }
             }
             _ => {
@@ -235,15 +237,39 @@ impl Seq {
     async fn on_command_error(&mut self, cid: &str, message: &str) {
         let err = || ModelSocketError::Command(message.to_string());
 
-        if let Some(sender) = self.cmds.lock().await.remove(cid) {
+        let cmd = self.cmds.lock().await.remove(cid);
+        let gen_stream = self.gen_streams.lock().await.remove(cid);
+        let embed_cmd = self.embed_cmds.lock().await.remove(cid);
+
+        if let Some(sender) = cmd {
             let _ = sender.send(Err(err())).await;
         }
 
-        if let Some(sender) = self.gen_streams.lock().await.remove(cid) {
+        if let Some(sender) = gen_stream {
             let _ = sender.send(Err(err())).await;
         }
 
-        if let Some(state) = self.embed_cmds.lock().await.remove(cid) {
+        if let Some(state) = embed_cmd {
+            let _ = state.sender.send(Err(err())).await;
+        }
+    }
+
+    async fn on_seq_error(&mut self, message: &str) {
+        let err = || ModelSocketError::Command(message.to_string());
+
+        let cmds = std::mem::take(&mut *self.cmds.lock().await);
+        let gen_streams = std::mem::take(&mut *self.gen_streams.lock().await);
+        let embed_cmds = std::mem::take(&mut *self.embed_cmds.lock().await);
+
+        for (_cid, tx) in cmds {
+            let _ = tx.send(Err(err())).await;
+        }
+
+        for (_cid, tx) in gen_streams {
+            let _ = tx.send(Err(err())).await;
+        }
+
+        for (_cid, state) in embed_cmds {
             let _ = state.sender.send(Err(err())).await;
         }
     }
@@ -555,4 +581,127 @@ pub struct EmbeddingResult {
     pub embeddings: Vec<Vec<f32>>,
     pub input_tokens: Vec<u32>,
     pub prompt_tokens: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::Sink;
+    use std::task::{Context, Poll};
+    use tokio::time::{timeout, Duration};
+
+    struct RequestSink;
+
+    impl Sink<MSRequest> for RequestSink {
+        type Error = ModelSocketError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: MSRequest) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn test_socket() -> ModelSocket {
+        let ws_sink: Pin<Box<dyn Sink<MSRequest, Error = ModelSocketError> + Send>> =
+            Box::pin(RequestSink);
+
+        ModelSocket {
+            ws_sink: Arc::new(Mutex::new(ws_sink)),
+            opening_seqs: Default::default(),
+            seqs: Default::default(),
+            closed_seqs: Default::default(),
+        }
+    }
+
+    fn assert_command_error<T>(result: Result<T, ModelSocketError>, message: &str) {
+        match result {
+            Err(ModelSocketError::Command(error)) => assert_eq!(error, message),
+            Err(error) => panic!("expected command error, got {error:?}"),
+            Ok(_) => panic!("expected command error, got ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn seq_level_error_fails_all_pending_commands_and_streams() {
+        let mut seq = Seq::new(
+            "seq-1".to_string(),
+            "model".to_string(),
+            test_socket(),
+            Arc::new(None),
+            None,
+        );
+
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        seq.cmds.lock().await.insert("cmd-1".to_string(), cmd_tx);
+
+        let (gen_tx, mut gen_rx) = mpsc::channel(1);
+        seq.gen_streams
+            .lock()
+            .await
+            .insert("gen-1".to_string(), gen_tx);
+
+        let (embed_tx, mut embed_rx) = mpsc::channel(1);
+        seq.embed_cmds.lock().await.insert(
+            "embed-1".to_string(),
+            EmbedCommandState {
+                embeddings: vec![None],
+                input_tokens: vec![0],
+                sender: embed_tx,
+            },
+        );
+
+        let message = "seq failed";
+        seq.on_event(&MSEvent::Error {
+            cid: None,
+            seq_id: Some("seq-1".to_string()),
+            message: message.to_string(),
+        })
+        .await;
+
+        assert_command_error(
+            timeout(Duration::from_millis(100), cmd_rx.recv())
+                .await
+                .expect("cmd error should be sent")
+                .expect("cmd channel should remain open"),
+            message,
+        );
+        assert_command_error(
+            timeout(Duration::from_millis(100), gen_rx.recv())
+                .await
+                .expect("gen error should be sent")
+                .expect("gen channel should remain open"),
+            message,
+        );
+        assert_command_error(
+            timeout(Duration::from_millis(100), embed_rx.recv())
+                .await
+                .expect("embed error should be sent")
+                .expect("embed channel should remain open"),
+            message,
+        );
+
+        assert!(seq.cmds.lock().await.is_empty());
+        assert!(seq.gen_streams.lock().await.is_empty());
+        assert!(seq.embed_cmds.lock().await.is_empty());
+    }
 }
