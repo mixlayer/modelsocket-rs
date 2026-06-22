@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use modelsocket::{
     client::{EmbedOpts, ModelSocket},
-    EmbeddingInput, EmbeddingInputType,
+    EmbeddingInput,
 };
 
 #[derive(Parser, Debug)]
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     ];
 
     let opts = EmbedOpts {
-        input_type: Some(EmbeddingInputType::SemanticSimilarity),
+        input_type: Some("semantic_similarity".to_string()),
         normalize: Some(true),
         ..Default::default()
     };

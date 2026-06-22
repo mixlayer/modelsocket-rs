@@ -1,7 +1,7 @@
 use crate::{
     protocol::{
-        EmbeddingInput, EmbeddingInputType, MSEvent, MSRequest, SeqAppendReq, SeqCloseReq,
-        SeqCommand, SeqEmbedReq, SeqForkReq, SeqGenReq,
+        EmbeddingInput, MSEvent, MSRequest, SeqAppendReq, SeqCloseReq, SeqCommand, SeqEmbedReq,
+        SeqForkReq, SeqGenReq,
     },
     tools::Toolbox,
     SeqToolCall, SeqToolReturnReq,
@@ -461,7 +461,6 @@ impl Seq {
                 data: SeqCommand::Embed(SeqEmbedReq {
                     inputs,
                     input_type: opts.input_type,
-                    instruction: opts.instruction,
                     dimensions: opts.dimensions,
                     normalize: opts.normalize,
                     truncate: opts.truncate,
@@ -515,8 +514,7 @@ impl Seq {
 
 #[derive(Debug, Default, Clone)]
 pub struct EmbedOpts {
-    pub input_type: Option<EmbeddingInputType>,
-    pub instruction: Option<String>,
+    pub input_type: Option<String>,
     pub dimensions: Option<u32>,
     pub normalize: Option<bool>,
     pub truncate: Option<bool>,

@@ -303,27 +303,11 @@ pub enum EmbeddingInput {
     Tokens(Vec<u32>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbeddingInputType {
-    SearchQuery,
-    SearchDocument,
-    Classification,
-    Clustering,
-    SemanticSimilarity,
-    CodeSearchQuery,
-    CodeSearchDocument,
-    BitextMining,
-    Image,
-}
-
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SeqEmbedReq {
     pub inputs: Vec<EmbeddingInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_type: Option<EmbeddingInputType>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instruction: Option<String>,
+    pub input_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
