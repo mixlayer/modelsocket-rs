@@ -8,7 +8,7 @@ use crate::{
 };
 use futures::{Sink, Stream};
 use futures_util::{SinkExt, StreamExt};
-pub use seq::{GenChunk, GenStream, Seq};
+pub use seq::{EmbedOpts, EmbeddingResult, GenChunk, GenStream, Seq};
 use std::{
     collections::{HashMap, HashSet},
     pin::Pin,
@@ -153,7 +153,16 @@ impl ModelSocketEventHandler {
         debug!("<- {:?}", event);
         match &event {
             MSEvent::SeqOpened { seq_id, cid } => self.on_seq_opened(seq_id, cid).await,
-            MSEvent::Error { cid, message, .. } => self.on_error(cid, message).await,
+            MSEvent::Error {
+                cid,
+                seq_id,
+                message,
+            } => {
+                self.on_error(cid, message).await;
+                if seq_id.is_some() {
+                    self.forward_to_seq(&event).await;
+                }
+            }
             MSEvent::SeqClosed { seq_id, .. } => {
                 // delegate to seq first to allow it to clean up
                 self.forward_to_seq(&event).await;
