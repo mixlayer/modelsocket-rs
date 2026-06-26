@@ -216,15 +216,32 @@ pub struct SeqOpenReq {
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SeqAppendReq {
+    #[serde(default)]
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<SeqAppendMedia>,
     #[serde(default)]
     pub hidden: bool,
     #[serde(default)]
     pub echo: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeqAppendMedia {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Sequence capabilities
@@ -346,7 +363,10 @@ pub struct SeqToolCall {
 
 #[cfg(test)]
 mod tests {
-    use super::{MSEvent, SeqToolCall, SeqToolReturnReq, ToolResult};
+    use super::{
+        MSEvent, SeqAppendMedia, SeqAppendReq, SeqCommand, SeqToolCall, SeqToolReturnReq,
+        ToolResult,
+    };
 
     #[test]
     fn seq_tool_call_deserializes_without_id() {
@@ -385,6 +405,74 @@ mod tests {
 
         let json = serde_json::to_string(&call).unwrap();
         assert!(!json.contains(r#""id""#));
+    }
+
+    #[test]
+    fn append_request_deserializes_legacy_text_payload() {
+        let json = r#"{"text":"hello","hidden":false,"echo":false,"role":"user"}"#;
+        let req: SeqAppendReq = serde_json::from_str(json).unwrap();
+
+        assert_eq!(req.text, "hello");
+        assert_eq!(req.role.as_deref(), Some("user"));
+        assert!(req.media.is_none());
+    }
+
+    #[test]
+    fn append_command_round_trips_with_media_uri() {
+        let cmd = SeqCommand::Append(SeqAppendReq {
+            text: String::new(),
+            media: Some(SeqAppendMedia {
+                uri: Some("https://example.com/cat.png".to_string()),
+                blob: None,
+                hash: Some("b3abc".to_string()),
+                mime_type: Some("image/png".to_string()),
+                detail: Some("auto".to_string()),
+            }),
+            role: Some("user".to_string()),
+            ..Default::default()
+        });
+
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""command":"append""#));
+        assert!(json.contains(r#""uri":"https://example.com/cat.png""#));
+
+        let parsed: SeqCommand = serde_json::from_str(&json).unwrap();
+        let SeqCommand::Append(parsed) = parsed else {
+            panic!("expected append command");
+        };
+        let media = parsed.media.expect("media should roundtrip");
+
+        assert_eq!(media.uri.as_deref(), Some("https://example.com/cat.png"));
+        assert_eq!(media.mime_type.as_deref(), Some("image/png"));
+        assert_eq!(media.detail.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn append_command_round_trips_with_media_blob() {
+        let cmd = SeqCommand::Append(SeqAppendReq {
+            text: String::new(),
+            media: Some(SeqAppendMedia {
+                uri: None,
+                blob: Some("aW1hZ2U=".to_string()),
+                hash: Some("b3abc".to_string()),
+                mime_type: Some("image/png".to_string()),
+                detail: Some("low".to_string()),
+            }),
+            role: Some("user".to_string()),
+            ..Default::default()
+        });
+
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""blob":"aW1hZ2U=""#));
+
+        let parsed: SeqCommand = serde_json::from_str(&json).unwrap();
+        let SeqCommand::Append(parsed) = parsed else {
+            panic!("expected append command");
+        };
+        let media = parsed.media.expect("media should roundtrip");
+
+        assert_eq!(media.blob.as_deref(), Some("aW1hZ2U="));
+        assert_eq!(media.detail.as_deref(), Some("low"));
     }
 
     #[test]
