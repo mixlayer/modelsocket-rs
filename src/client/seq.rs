@@ -1,7 +1,7 @@
 use crate::{
     protocol::{
-        EmbeddingInput, MSEvent, MSRequest, SeqAppendReq, SeqCloseReq, SeqCommand, SeqEmbedReq,
-        SeqForkReq, SeqGenReq,
+        EmbeddingInput, MSEvent, MSRequest, SeqAppendMedia, SeqAppendReq, SeqCloseReq, SeqCommand,
+        SeqEmbedReq, SeqForkReq, SeqGenReq,
     },
     tools::Toolbox,
     SeqToolCall, SeqToolReturnReq,
@@ -364,6 +364,34 @@ impl Seq {
                 seq_id: self.seq_id.clone(),
                 data: SeqCommand::Append(SeqAppendReq {
                     text: text.as_ref().to_string(),
+                    role: opts.role,
+                    ..Default::default()
+                }),
+            })
+            .await?;
+
+        rx.recv()
+            .await
+            .ok_or_else(|| ModelSocketError::Command("failed to receive response".into()))??;
+
+        Ok(())
+    }
+
+    pub async fn append_media(
+        &self,
+        media: SeqAppendMedia,
+        opts: AppendOpts,
+    ) -> Result<(), ModelSocketError> {
+        let cid = Uuid::new_v4().to_string();
+        let (tx, mut rx) = mpsc::channel(1);
+        self.cmds.lock().await.insert(cid.clone(), tx);
+
+        self.socket
+            .send_request(MSRequest::SeqCommand {
+                cid: cid.clone(),
+                seq_id: self.seq_id.clone(),
+                data: SeqCommand::Append(SeqAppendReq {
+                    media: Some(media),
                     role: opts.role,
                     ..Default::default()
                 }),
