@@ -17,7 +17,7 @@ use std::{
 use thiserror::Error;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::{protocol::Message, Error as WsError};
-use tracing::{debug, error, instrument};
+use tracing::{debug, error};
 use uuid::Uuid;
 
 #[derive(Error, Debug)]
@@ -148,7 +148,6 @@ impl ModelSocketEventHandler {
     }
 
     /// Handles events received from the model
-    #[instrument(name = "on_seq_event", skip(self), fields(event = ?event.event_type(), seq_id = ?event.seq_id().unwrap_or("unknown")))]
     async fn on_event(&self, event: MSEvent) {
         debug!("<- {:?}", event);
         match &event {
