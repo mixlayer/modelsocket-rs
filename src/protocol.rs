@@ -231,7 +231,7 @@ pub struct SeqAppendReq {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SeqAppendMedia {
+pub struct MediaInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,6 +243,9 @@ pub struct SeqAppendMedia {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
+
+pub type SeqAppendMedia = MediaInput;
+pub type EmbedMediaInput = MediaInput;
 
 /// Sequence capabilities
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +321,14 @@ pub struct SeqGenReq {
 pub enum EmbeddingInput {
     Text(String),
     Tokens(Vec<u32>),
+    Content(Vec<EmbeddingContentPart>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingContentPart {
+    Text(String),
+    Media(EmbedMediaInput),
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -364,9 +375,19 @@ pub struct SeqToolCall {
 #[cfg(test)]
 mod tests {
     use super::{
-        MSEvent, SeqAppendMedia, SeqAppendReq, SeqCommand, SeqToolCall, SeqToolReturnReq,
-        ToolResult,
+        EmbeddingContentPart, EmbeddingInput, MSEvent, SeqAppendMedia, SeqAppendReq, SeqCommand,
+        SeqEmbedReq, SeqToolCall, SeqToolReturnReq, ToolResult,
     };
+    use serde_json::{json, Value};
+
+    fn round_trip_embed(value: Value) -> SeqEmbedReq {
+        let cmd: SeqCommand = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&cmd).unwrap(), value);
+        let SeqCommand::Embed(req) = cmd else {
+            panic!("expected embed command");
+        };
+        req
+    }
 
     #[test]
     fn seq_tool_call_deserializes_without_id() {
@@ -472,6 +493,80 @@ mod tests {
         let media = parsed.media.expect("media should roundtrip");
 
         assert_eq!(media.blob.as_deref(), Some("aW1hZ2U="));
+        assert_eq!(media.detail.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn embed_command_supports_simple_inputs() {
+        let req = round_trip_embed(json!({
+            "command": "embed",
+            "inputs": [
+                { "text": "hello" },
+                { "tokens": [1, 2, 3] }
+            ]
+        }));
+        assert!(matches!(
+            &req.inputs[..],
+            [EmbeddingInput::Text(text), EmbeddingInput::Tokens(tokens)]
+                if text == "hello" && tokens == &[1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn embed_command_supports_content_with_media_uri() {
+        let req = round_trip_embed(json!({
+            "command": "embed",
+            "inputs": [{
+                "content": [
+                    { "text": "A bicycle" },
+                    { "media": {
+                        "uri": "https://example.com/bicycle.png",
+                        "mime_type": "image/png",
+                        "detail": "high"
+                    }}
+                ]
+            }]
+        }));
+        let EmbeddingInput::Content(parts) = &req.inputs[0] else {
+            panic!("expected content input");
+        };
+        let [EmbeddingContentPart::Text(text), EmbeddingContentPart::Media(media)] = &parts[..]
+        else {
+            panic!("expected ordered text and media parts");
+        };
+        assert_eq!(text, "A bicycle");
+        assert_eq!(
+            media.uri.as_deref(),
+            Some("https://example.com/bicycle.png")
+        );
+        assert_eq!(media.mime_type.as_deref(), Some("image/png"));
+        assert_eq!(media.detail.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn embed_command_supports_content_with_media_blob() {
+        let req = round_trip_embed(json!({
+            "command": "embed",
+            "inputs": [{
+                "content": [{
+                    "media": {
+                        "blob": "aW1hZ2U=",
+                        "hash": "b3abc",
+                        "mime_type": "image/png",
+                        "detail": "low"
+                    }
+                }]
+            }]
+        }));
+        let EmbeddingInput::Content(parts) = &req.inputs[0] else {
+            panic!("expected content input");
+        };
+        let EmbeddingContentPart::Media(media) = &parts[0] else {
+            panic!("expected media part");
+        };
+        assert_eq!(media.blob.as_deref(), Some("aW1hZ2U="));
+        assert_eq!(media.hash.as_deref(), Some("b3abc"));
+        assert_eq!(media.mime_type.as_deref(), Some("image/png"));
         assert_eq!(media.detail.as_deref(), Some("low"));
     }
 
