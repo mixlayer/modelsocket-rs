@@ -3,7 +3,7 @@ pub mod tools;
 pub mod transport;
 
 use crate::{
-    protocol::{MSEvent, MSRequest, RateLimitErrorDetails, SeqGenReq, SeqOpenReq},
+    protocol::{MSEvent, MSRequest, SeqGenReq, SeqOpenReq},
     tools::Toolbox,
 };
 use futures::{Sink, Stream};
@@ -50,10 +50,10 @@ pub enum ModelSocketError {
     Command(String),
 
     #[error("{message}")]
-    RateLimit {
+    Remote {
         message: String,
-        code: String,
-        details: RateLimitErrorDetails,
+        code: Option<String>,
+        details: Option<serde_json::Map<String, serde_json::Value>>,
     },
 
     #[error("{0}")]
@@ -164,9 +164,9 @@ impl ModelSocketEventHandler {
                 seq_id,
                 message,
                 code,
-                rate_limit,
+                details,
             } => {
-                self.on_error(cid, message, code, rate_limit).await;
+                self.on_error(cid, message, code, details).await;
                 if seq_id.is_some() {
                     self.forward_to_seq(&event).await;
                 }
@@ -216,17 +216,13 @@ impl ModelSocketEventHandler {
         cid: &Option<String>,
         message: &str,
         code: &Option<String>,
-        rate_limit: &Option<RateLimitErrorDetails>,
+        details: &Option<serde_json::Map<String, serde_json::Value>>,
     ) {
         error!("error: {}", message);
 
         if let Some(cid) = cid {
             if let Some(sender) = self.opening_seqs.lock().await.remove(cid) {
-                let _ = sender
-                    .send(Err(remote_error(message, code, rate_limit).unwrap_or_else(
-                        || ModelSocketError::Open(format!("open error: {message}")),
-                    )))
-                    .await;
+                let _ = sender.send(Err(remote_error(message, code, details))).await;
             }
         }
     }
@@ -259,13 +255,13 @@ impl ModelSocketEventHandler {
 fn remote_error(
     message: &str,
     code: &Option<String>,
-    rate_limit: &Option<RateLimitErrorDetails>,
-) -> Option<ModelSocketError> {
-    Some(ModelSocketError::RateLimit {
+    details: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> ModelSocketError {
+    ModelSocketError::Remote {
         message: message.to_string(),
-        code: code.clone()?,
-        details: rate_limit.clone()?,
-    })
+        code: code.clone(),
+        details: details.clone(),
+    }
 }
 
 impl ModelSocket {
@@ -524,7 +520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_error_preserves_rate_limit_details() {
+    async fn open_error_preserves_remote_details() {
         let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let socket = ModelSocket::new(ChannelTransport {
@@ -536,35 +532,36 @@ mod tests {
         let MSRequest::SeqOpen { cid, .. } = request_rx.recv().await.unwrap() else {
             panic!("expected sequence open");
         };
-        let details = RateLimitErrorDetails {
-            cause: "rate_limited".into(),
-            enforcement_mode: "enforced".into(),
-            rpm_limit: 60,
-            rpm_remaining: 0,
-            tpm_limit: 100_000,
-            tpm_remaining: 0,
-            retry_after_ms: 1_000,
-        };
+        let details = serde_json::json!({
+            "rpm_limit": 60,
+            "rpm_remaining": 0,
+            "tpm_limit": 100_000,
+            "tpm_remaining": 0,
+            "retry_after_ms": 1_000
+        })
+        .as_object()
+        .unwrap()
+        .clone();
         event_tx
             .send(Ok(MSEvent::Error {
                 cid: Some(cid),
                 seq_id: Some("seq-1".into()),
                 message: "Rate limit exceeded".into(),
                 code: Some("rate_limit_exceeded".into()),
-                rate_limit: Some(details.clone()),
+                details: Some(details.clone()),
             }))
             .unwrap();
 
         match open.await.unwrap() {
-            Err(ModelSocketError::RateLimit {
+            Err(ModelSocketError::Remote {
                 code,
                 details: actual,
                 ..
             }) => {
-                assert_eq!(code, "rate_limit_exceeded");
-                assert_eq!(actual, details);
+                assert_eq!(code.as_deref(), Some("rate_limit_exceeded"));
+                assert_eq!(actual, Some(details));
             }
-            _ => panic!("expected structured rate-limit error"),
+            _ => panic!("expected structured remote error"),
         }
     }
 }

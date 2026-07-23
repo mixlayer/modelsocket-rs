@@ -135,20 +135,8 @@ pub enum MSEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        rate_limit: Option<RateLimitErrorDetails>,
+        details: Option<serde_json::Map<String, serde_json::Value>>,
     },
-}
-
-/// Structured rate-limit state attached to a ModelSocket error.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RateLimitErrorDetails {
-    pub cause: String,
-    pub enforcement_mode: String,
-    pub rpm_limit: u32,
-    pub rpm_remaining: i64,
-    pub tpm_limit: u32,
-    pub tpm_remaining: i64,
-    pub retry_after_ms: u64,
 }
 
 impl MSEvent {
@@ -380,8 +368,8 @@ pub struct SeqToolCall {
 #[cfg(test)]
 mod tests {
     use super::{
-        MSEvent, RateLimitErrorDetails, SeqAppendMedia, SeqAppendReq, SeqCommand, SeqToolCall,
-        SeqToolReturnReq, ToolResult,
+        MSEvent, SeqAppendMedia, SeqAppendReq, SeqCommand, SeqToolCall, SeqToolReturnReq,
+        ToolResult,
     };
 
     #[test]
@@ -401,25 +389,27 @@ mod tests {
             old,
             MSEvent::Error {
                 code: None,
-                rate_limit: None,
+                details: None,
                 ..
             }
         ));
 
+        let details = serde_json::json!({
+            "rpm_limit": 60,
+            "rpm_remaining": 0,
+            "tpm_limit": 100_000,
+            "tpm_remaining": -5,
+            "retry_after_ms": 1_000
+        })
+        .as_object()
+        .unwrap()
+        .clone();
         let event = MSEvent::Error {
             cid: Some("gen".into()),
             seq_id: Some("seq_1".into()),
             message: "Rate limit exceeded".into(),
             code: Some("rate_limit_exceeded".into()),
-            rate_limit: Some(RateLimitErrorDetails {
-                cause: "rate_limited".into(),
-                enforcement_mode: "enforced".into(),
-                rpm_limit: 60,
-                rpm_remaining: 0,
-                tpm_limit: 100_000,
-                tpm_remaining: -5,
-                retry_after_ms: 1_000,
-            }),
+            details: Some(details),
         };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: MSEvent = serde_json::from_str(&json).unwrap();
