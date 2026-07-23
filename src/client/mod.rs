@@ -3,7 +3,7 @@ pub mod tools;
 pub mod transport;
 
 use crate::{
-    protocol::{MSEvent, MSRequest, SeqGenReq, SeqOpenReq},
+    protocol::{MSEvent, MSRequest, RateLimitErrorDetails, SeqGenReq, SeqOpenReq},
     tools::Toolbox,
 };
 use futures::{Sink, Stream};
@@ -48,6 +48,13 @@ pub enum ModelSocketError {
 
     #[error("command error: {0}")]
     Command(String),
+
+    #[error("{message}")]
+    RateLimit {
+        message: String,
+        code: String,
+        details: RateLimitErrorDetails,
+    },
 
     #[error("{0}")]
     Other(#[from] anyhow::Error),
@@ -156,8 +163,10 @@ impl ModelSocketEventHandler {
                 cid,
                 seq_id,
                 message,
+                code,
+                rate_limit,
             } => {
-                self.on_error(cid, message).await;
+                self.on_error(cid, message, code, rate_limit).await;
                 if seq_id.is_some() {
                     self.forward_to_seq(&event).await;
                 }
@@ -202,16 +211,21 @@ impl ModelSocketEventHandler {
         }
     }
 
-    async fn on_error(&self, cid: &Option<String>, message: &str) {
+    async fn on_error(
+        &self,
+        cid: &Option<String>,
+        message: &str,
+        code: &Option<String>,
+        rate_limit: &Option<RateLimitErrorDetails>,
+    ) {
         error!("error: {}", message);
 
         if let Some(cid) = cid {
             if let Some(sender) = self.opening_seqs.lock().await.remove(cid) {
                 let _ = sender
-                    .send(Err(ModelSocketError::Open(format!(
-                        "open error: {}",
-                        message
-                    ))))
+                    .send(Err(remote_error(message, code, rate_limit).unwrap_or_else(
+                        || ModelSocketError::Open(format!("open error: {message}")),
+                    )))
                     .await;
             }
         }
@@ -240,6 +254,18 @@ impl ModelSocketEventHandler {
             error!("unknown opened seq cid {}", cid);
         }
     }
+}
+
+fn remote_error(
+    message: &str,
+    code: &Option<String>,
+    rate_limit: &Option<RateLimitErrorDetails>,
+) -> Option<ModelSocketError> {
+    Some(ModelSocketError::RateLimit {
+        message: message.to_string(),
+        code: code.clone()?,
+        details: rate_limit.clone()?,
+    })
 }
 
 impl ModelSocket {
@@ -495,5 +521,50 @@ mod tests {
         assert!(closed.is_none());
 
         drop(event_tx);
+    }
+
+    #[tokio::test]
+    async fn open_error_preserves_rate_limit_details() {
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let socket = ModelSocket::new(ChannelTransport {
+            requests: request_tx,
+            events: event_rx,
+        })
+        .unwrap();
+        let open = tokio::spawn(async move { socket.open("model", None).await });
+        let MSRequest::SeqOpen { cid, .. } = request_rx.recv().await.unwrap() else {
+            panic!("expected sequence open");
+        };
+        let details = RateLimitErrorDetails {
+            cause: "rate_limited".into(),
+            enforcement_mode: "enforced".into(),
+            rpm_limit: 60,
+            rpm_remaining: 0,
+            tpm_limit: 100_000,
+            tpm_remaining: 0,
+            retry_after_ms: 1_000,
+        };
+        event_tx
+            .send(Ok(MSEvent::Error {
+                cid: Some(cid),
+                seq_id: Some("seq-1".into()),
+                message: "Rate limit exceeded".into(),
+                code: Some("rate_limit_exceeded".into()),
+                rate_limit: Some(details.clone()),
+            }))
+            .unwrap();
+
+        match open.await.unwrap() {
+            Err(ModelSocketError::RateLimit {
+                code,
+                details: actual,
+                ..
+            }) => {
+                assert_eq!(code, "rate_limit_exceeded");
+                assert_eq!(actual, details);
+            }
+            _ => panic!("expected structured rate-limit error"),
+        }
     }
 }
