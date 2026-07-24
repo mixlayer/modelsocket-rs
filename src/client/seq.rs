@@ -119,11 +119,17 @@ impl Seq {
             | MSEvent::SeqToolCallEnd { .. }
             | MSEvent::SeqToolCallAborted { .. }
             | MSEvent::SeqState { .. } => {}
-            MSEvent::Error { cid, message, .. } => {
+            MSEvent::Error {
+                cid,
+                message,
+                code,
+                details,
+                ..
+            } => {
                 if let Some(cid) = cid {
-                    self.on_command_error(cid, message).await;
+                    self.on_command_error(cid, message, code, details).await;
                 } else {
-                    self.on_seq_error(message).await;
+                    self.on_seq_error(message, code, details).await;
                 }
             }
             _ => {
@@ -234,8 +240,14 @@ impl Seq {
         }
     }
 
-    async fn on_command_error(&mut self, cid: &str, message: &str) {
-        let err = || ModelSocketError::Command(message.to_string());
+    async fn on_command_error(
+        &mut self,
+        cid: &str,
+        message: &str,
+        code: &Option<String>,
+        details: &Option<serde_json::Map<String, serde_json::Value>>,
+    ) {
+        let err = || super::remote_error(message, code, details);
 
         let cmd = self.cmds.lock().await.remove(cid);
         let gen_stream = self.gen_streams.lock().await.remove(cid);
@@ -254,8 +266,13 @@ impl Seq {
         }
     }
 
-    async fn on_seq_error(&mut self, message: &str) {
-        let err = || ModelSocketError::Command(message.to_string());
+    async fn on_seq_error(
+        &mut self,
+        message: &str,
+        code: &Option<String>,
+        details: &Option<serde_json::Map<String, serde_json::Value>>,
+    ) {
+        let err = || super::remote_error(message, code, details);
 
         let cmds = std::mem::take(&mut *self.cmds.lock().await);
         let gen_streams = std::mem::take(&mut *self.gen_streams.lock().await);
@@ -659,11 +676,15 @@ mod tests {
         }
     }
 
-    fn assert_command_error<T>(result: Result<T, ModelSocketError>, message: &str) {
+    fn assert_remote_error<T>(result: Result<T, ModelSocketError>, message: &str) {
         match result {
-            Err(ModelSocketError::Command(error)) => assert_eq!(error, message),
-            Err(error) => panic!("expected command error, got {error:?}"),
-            Ok(_) => panic!("expected command error, got ok"),
+            Err(ModelSocketError::Remote {
+                message: error,
+                code: None,
+                details: None,
+            }) => assert_eq!(error, message),
+            Err(error) => panic!("expected remote error, got {error:?}"),
+            Ok(_) => panic!("expected remote error, got ok"),
         }
     }
 
@@ -701,24 +722,26 @@ mod tests {
             cid: None,
             seq_id: Some("seq-1".to_string()),
             message: message.to_string(),
+            code: None,
+            details: None,
         })
         .await;
 
-        assert_command_error(
+        assert_remote_error(
             timeout(Duration::from_millis(100), cmd_rx.recv())
                 .await
                 .expect("cmd error should be sent")
                 .expect("cmd channel should remain open"),
             message,
         );
-        assert_command_error(
+        assert_remote_error(
             timeout(Duration::from_millis(100), gen_rx.recv())
                 .await
                 .expect("gen error should be sent")
                 .expect("gen channel should remain open"),
             message,
         );
-        assert_command_error(
+        assert_remote_error(
             timeout(Duration::from_millis(100), embed_rx.recv())
                 .await
                 .expect("embed error should be sent")
@@ -729,5 +752,49 @@ mod tests {
         assert!(seq.cmds.lock().await.is_empty());
         assert!(seq.gen_streams.lock().await.is_empty());
         assert!(seq.embed_cmds.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_error_preserves_remote_details() {
+        let mut seq = Seq::new(
+            "seq-1".to_string(),
+            "model".to_string(),
+            test_socket(),
+            Arc::new(None),
+            None,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+        seq.cmds.lock().await.insert("gen".to_string(), tx);
+        let details = serde_json::json!({
+            "rpm_limit": 60,
+            "rpm_remaining": 0,
+            "tpm_limit": 100_000,
+            "tpm_remaining": -1,
+            "retry_after_ms": 1_000
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        seq.on_event(&MSEvent::Error {
+            cid: Some("gen".into()),
+            seq_id: Some("seq-1".into()),
+            message: "Rate limit exceeded".into(),
+            code: Some("rate_limit_exceeded".into()),
+            details: Some(details.clone()),
+        })
+        .await;
+
+        match rx.recv().await.unwrap() {
+            Err(ModelSocketError::Remote {
+                code,
+                details: actual,
+                ..
+            }) => {
+                assert_eq!(code.as_deref(), Some("rate_limit_exceeded"));
+                assert_eq!(actual, Some(details));
+            }
+            other => panic!("expected structured remote error, got {other:?}"),
+        }
     }
 }

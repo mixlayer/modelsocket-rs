@@ -132,6 +132,10 @@ pub enum MSEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         seq_id: Option<String>,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Map<String, serde_json::Value>>,
     },
 }
 
@@ -376,6 +380,43 @@ mod tests {
         assert_eq!(call.id, None);
         assert_eq!(call.name, "search");
         assert_eq!(call.args, r#"{"q":"hello"}"#);
+    }
+
+    #[test]
+    fn error_details_are_backward_compatible() {
+        let old: MSEvent = serde_json::from_str(r#"{"event":"error","message":"nope"}"#).unwrap();
+        assert!(matches!(
+            old,
+            MSEvent::Error {
+                code: None,
+                details: None,
+                ..
+            }
+        ));
+
+        let details = serde_json::json!({
+            "rpm_limit": 60,
+            "rpm_remaining": 0,
+            "tpm_limit": 100_000,
+            "tpm_remaining": -5,
+            "retry_after_ms": 1_000
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let event = MSEvent::Error {
+            cid: Some("gen".into()),
+            seq_id: Some("seq_1".into()),
+            message: "Rate limit exceeded".into(),
+            code: Some("rate_limit_exceeded".into()),
+            details: Some(details),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: MSEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(event).unwrap()
+        );
     }
 
     #[test]

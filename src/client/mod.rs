@@ -49,6 +49,13 @@ pub enum ModelSocketError {
     #[error("command error: {0}")]
     Command(String),
 
+    #[error("{message}")]
+    Remote {
+        message: String,
+        code: Option<String>,
+        details: Option<serde_json::Map<String, serde_json::Value>>,
+    },
+
     #[error("{0}")]
     Other(#[from] anyhow::Error),
 }
@@ -156,8 +163,10 @@ impl ModelSocketEventHandler {
                 cid,
                 seq_id,
                 message,
+                code,
+                details,
             } => {
-                self.on_error(cid, message).await;
+                self.on_error(cid, message, code, details).await;
                 if seq_id.is_some() {
                     self.forward_to_seq(&event).await;
                 }
@@ -202,17 +211,18 @@ impl ModelSocketEventHandler {
         }
     }
 
-    async fn on_error(&self, cid: &Option<String>, message: &str) {
+    async fn on_error(
+        &self,
+        cid: &Option<String>,
+        message: &str,
+        code: &Option<String>,
+        details: &Option<serde_json::Map<String, serde_json::Value>>,
+    ) {
         error!("error: {}", message);
 
         if let Some(cid) = cid {
             if let Some(sender) = self.opening_seqs.lock().await.remove(cid) {
-                let _ = sender
-                    .send(Err(ModelSocketError::Open(format!(
-                        "open error: {}",
-                        message
-                    ))))
-                    .await;
+                let _ = sender.send(Err(remote_error(message, code, details))).await;
             }
         }
     }
@@ -239,6 +249,18 @@ impl ModelSocketEventHandler {
         } else {
             error!("unknown opened seq cid {}", cid);
         }
+    }
+}
+
+fn remote_error(
+    message: &str,
+    code: &Option<String>,
+    details: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> ModelSocketError {
+    ModelSocketError::Remote {
+        message: message.to_string(),
+        code: code.clone(),
+        details: details.clone(),
     }
 }
 
@@ -495,5 +517,51 @@ mod tests {
         assert!(closed.is_none());
 
         drop(event_tx);
+    }
+
+    #[tokio::test]
+    async fn open_error_preserves_remote_details() {
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let socket = ModelSocket::new(ChannelTransport {
+            requests: request_tx,
+            events: event_rx,
+        })
+        .unwrap();
+        let open = tokio::spawn(async move { socket.open("model", None).await });
+        let MSRequest::SeqOpen { cid, .. } = request_rx.recv().await.unwrap() else {
+            panic!("expected sequence open");
+        };
+        let details = serde_json::json!({
+            "rpm_limit": 60,
+            "rpm_remaining": 0,
+            "tpm_limit": 100_000,
+            "tpm_remaining": 0,
+            "retry_after_ms": 1_000
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        event_tx
+            .send(Ok(MSEvent::Error {
+                cid: Some(cid),
+                seq_id: Some("seq-1".into()),
+                message: "Rate limit exceeded".into(),
+                code: Some("rate_limit_exceeded".into()),
+                details: Some(details.clone()),
+            }))
+            .unwrap();
+
+        match open.await.unwrap() {
+            Err(ModelSocketError::Remote {
+                code,
+                details: actual,
+                ..
+            }) => {
+                assert_eq!(code.as_deref(), Some("rate_limit_exceeded"));
+                assert_eq!(actual, Some(details));
+            }
+            _ => panic!("expected structured remote error"),
+        }
     }
 }
