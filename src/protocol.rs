@@ -53,6 +53,8 @@ pub enum MSEvent {
     SeqGenFinish {
         seq_id: String,
         cid: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<SeqStopReason>,
     },
     SeqEmbedding {
         seq_id: String,
@@ -137,6 +139,21 @@ pub enum MSEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<serde_json::Map<String, serde_json::Value>>,
     },
+}
+
+/// Why model generation stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeqStopReason {
+    /// The model emitted its end-of-sequence token.
+    Eos,
+    /// The requested generation token limit was reached.
+    MaxTokens,
+    /// A caller-provided stop string was encountered.
+    StopText,
+    /// The server reported a stop reason this client does not recognize.
+    #[serde(other)]
+    Unknown,
 }
 
 impl MSEvent {
