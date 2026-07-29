@@ -207,7 +207,7 @@ impl ModelSocketEventHandler {
         if let Some(seq) = seqs.get_mut(seq_id) {
             seq.on_event(event).await;
         } else {
-            error!("state error: unknown seq_id {}", seq_id);
+            error!(seq_id, "state error: unknown seq_id");
         }
     }
 
@@ -247,7 +247,7 @@ impl ModelSocketEventHandler {
                 error!("failed to send seq_id: {}", e);
             }
         } else {
-            error!("unknown opened seq cid {}", cid);
+            error!(cid, "unknown opened seq cid");
         }
     }
 }
