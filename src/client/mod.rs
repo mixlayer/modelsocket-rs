@@ -247,7 +247,7 @@ impl ModelSocketEventHandler {
                 error!("failed to send seq_id: {}", e);
             }
         } else {
-            error!("unknown opened seq cid {}", cid);
+            error!(cid, "unknown opened seq cid");
         }
     }
 }
