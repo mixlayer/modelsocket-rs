@@ -207,7 +207,7 @@ impl ModelSocketEventHandler {
         if let Some(seq) = seqs.get_mut(seq_id) {
             seq.on_event(event).await;
         } else {
-            error!("state error: unknown seq_id {}", seq_id);
+            error!(seq_id, "state error: unknown seq_id");
         }
     }
 
