@@ -37,6 +37,9 @@ pub struct Seq {
     /// open gen streams waiting for a response and their return channels
     gen_streams: Arc<Mutex<HashMap<String, mpsc::Sender<Result<GenChunk, ModelSocketError>>>>>,
 
+    /// options for the active generation leg, reused by automatic tool returns
+    active_gen_opts: Arc<Mutex<SeqGenReq>>,
+
     /// open embedding commands waiting for a complete batch response
     embed_cmds: Arc<Mutex<HashMap<String, EmbedCommandState>>>,
 
@@ -61,6 +64,7 @@ impl Seq {
             socket,
             cmds: Arc::new(Mutex::new(HashMap::new())),
             gen_streams: Arc::new(Mutex::new(HashMap::new())),
+            active_gen_opts: Arc::new(Mutex::new(SeqGenReq::default())),
             embed_cmds: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
             toolbox,
@@ -330,7 +334,7 @@ impl Seq {
                     seq_id: self.seq_id.clone(),
                     data: SeqCommand::ToolReturn(SeqToolReturnReq {
                         results,
-                        gen_opts: Default::default(), //TODO resume generating with the same options
+                        gen_opts: self.active_gen_opts.lock().await.clone(),
                     }),
                 };
 
@@ -355,6 +359,10 @@ impl Seq {
         cid: S,
         cmd: SeqCommand,
     ) -> Result<(), ModelSocketError> {
+        if let SeqCommand::Gen(gen_opts) = &cmd {
+            *self.active_gen_opts.lock().await = gen_opts.clone();
+        }
+
         self.socket
             .send_request(MSRequest::SeqCommand {
                 cid: cid.as_ref().to_string(),
@@ -433,11 +441,14 @@ impl Seq {
         let (stream_tx, stream_rx) = mpsc::channel(100);
         self.gen_streams.lock().await.insert(cid.clone(), stream_tx);
 
+        let gen_opts = opts.map(Into::into).unwrap_or_default();
+        *self.active_gen_opts.lock().await = gen_opts.clone();
+
         self.socket
             .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
                 seq_id: self.seq_id.clone(),
-                data: SeqCommand::Gen(opts.map(|o| o.into()).unwrap_or_default()),
+                data: SeqCommand::Gen(gen_opts),
             })
             .await?;
 
@@ -629,6 +640,9 @@ pub struct EmbeddingResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolResult;
+    use anyhow::Result;
+    use async_trait::async_trait;
     use futures::Sink;
     use std::task::{Context, Poll};
     use tokio::time::{timeout, Duration};
@@ -664,6 +678,29 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct TestToolbox;
+
+    #[async_trait]
+    impl Toolbox for TestToolbox {
+        async fn call_tools(&self, calls: &[SeqToolCall]) -> Result<Option<Vec<ToolResult>>> {
+            Ok(Some(
+                calls
+                    .iter()
+                    .map(|call| ToolResult {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        result: "ok".to_string(),
+                    })
+                    .collect(),
+            ))
+        }
+
+        fn tool_def_prompt(&self) -> Option<String> {
+            None
+        }
+    }
+
     fn test_socket() -> ModelSocket {
         let ws_sink: Pin<Box<dyn Sink<MSRequest, Error = ModelSocketError> + Send>> =
             Box::pin(RequestSink);
@@ -673,6 +710,87 @@ mod tests {
             opening_seqs: Default::default(),
             seqs: Default::default(),
             closed_seqs: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_tool_return_preserves_generation_options() {
+        let (request_tx, mut request_rx) = mpsc::unbounded_channel();
+        let ws_sink: Pin<Box<dyn Sink<MSRequest, Error = ModelSocketError> + Send>> =
+            Box::pin(CapturingRequestSink(request_tx));
+        let mut seq = Seq::new(
+            "seq-1".to_string(),
+            "model".to_string(),
+            ModelSocket {
+                ws_sink: Arc::new(Mutex::new(ws_sink)),
+                opening_seqs: Default::default(),
+                seqs: Default::default(),
+                closed_seqs: Default::default(),
+            },
+            Arc::new(Some(Mutex::new(Box::new(TestToolbox)))),
+            None,
+        );
+        seq.send_cmd(
+            "gen",
+            SeqCommand::Gen(SeqGenReq {
+                max_emitted_tools: Some(1),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = request_rx.recv().await.unwrap();
+
+        seq.on_tool_call(
+            "gen",
+            &vec![SeqToolCall {
+                id: Some("call-1".to_string()),
+                name: "search".to_string(),
+                args: "{}".to_string(),
+            }],
+        )
+        .await;
+
+        let MSRequest::SeqCommand {
+            data: SeqCommand::ToolReturn(request),
+            ..
+        } = request_rx.recv().await.unwrap()
+        else {
+            panic!("expected tool return request");
+        };
+        assert_eq!(request.gen_opts.max_emitted_tools, Some(1));
+    }
+
+    struct CapturingRequestSink(mpsc::UnboundedSender<MSRequest>);
+
+    impl Sink<MSRequest> for CapturingRequestSink {
+        type Error = ModelSocketError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: MSRequest) -> Result<(), Self::Error> {
+            self.0
+                .send(item)
+                .map_err(|_| ModelSocketError::State("request receiver closed".to_string()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
         }
     }
 

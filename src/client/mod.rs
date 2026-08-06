@@ -351,6 +351,7 @@ pub struct GenOpts {
     pub json_schema_strict: Option<bool>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+    pub max_emitted_tools: Option<u32>,
 }
 
 impl GenOpts {
@@ -393,6 +394,7 @@ impl Into<SeqGenReq> for GenOpts {
             json_schema_strict: self.json_schema_strict,
             frequency_penalty: self.frequency_penalty,
             presence_penalty: self.presence_penalty,
+            max_emitted_tools: self.max_emitted_tools,
             ..Default::default()
         }
     }

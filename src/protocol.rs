@@ -335,6 +335,8 @@ pub struct SeqGenReq {
     pub frequency_penalty: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_emitted_tools: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
