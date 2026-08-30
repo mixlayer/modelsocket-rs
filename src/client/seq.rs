@@ -1,7 +1,7 @@
 use crate::{
     protocol::{
-        EmbeddingInput, MSEvent, MSRequest, SeqAppendMedia, SeqAppendReq, SeqCloseReq, SeqCommand,
-        SeqEmbedReq, SeqForkReq, SeqGenReq,
+        EmbeddingInput, MSEvent, MSRequest, SeqAppendMedia, SeqAppendPart, SeqAppendPartsReq,
+        SeqAppendReq, SeqCloseReq, SeqCommand, SeqEmbedReq, SeqForkReq, SeqGenReq,
     },
     tools::Toolbox,
     SeqToolCall, SeqToolReturnReq,
@@ -430,6 +430,36 @@ impl Seq {
         Ok(())
     }
 
+    /// Appends ordered text, token, and media parts in one prefill operation.
+    pub async fn append_parts(
+        &self,
+        parts: Vec<SeqAppendPart>,
+        opts: AppendOpts,
+    ) -> Result<(), ModelSocketError> {
+        let cid = Uuid::new_v4().to_string();
+        let (tx, mut rx) = mpsc::channel(1);
+        self.cmds.lock().await.insert(cid.clone(), tx);
+
+        self.socket
+            .send_request(MSRequest::SeqCommand {
+                cid: cid.clone(),
+                seq_id: self.seq_id.clone(),
+                data: SeqCommand::AppendParts(SeqAppendPartsReq {
+                    parts,
+                    hidden: false,
+                    echo: false,
+                    role: opts.role,
+                }),
+            })
+            .await?;
+
+        rx.recv()
+            .await
+            .ok_or_else(|| ModelSocketError::Command("failed to receive response".into()))??;
+
+        Ok(())
+    }
+
     pub async fn generate<O: Into<SeqGenReq>>(
         &self,
         opts: Option<O>,
@@ -759,6 +789,66 @@ mod tests {
             panic!("expected tool return request");
         };
         assert_eq!(request.gen_opts.max_emitted_tools, Some(1));
+    }
+
+    #[tokio::test]
+    async fn append_parts_sends_ordered_parts_and_waits_for_completion() {
+        let (request_tx, mut request_rx) = mpsc::unbounded_channel();
+        let ws_sink: Pin<Box<dyn Sink<MSRequest, Error = ModelSocketError> + Send>> =
+            Box::pin(CapturingRequestSink(request_tx));
+        let seq = Seq::new(
+            "seq-1".to_string(),
+            "model".to_string(),
+            ModelSocket {
+                ws_sink: Arc::new(Mutex::new(ws_sink)),
+                opening_seqs: Default::default(),
+                seqs: Default::default(),
+                closed_seqs: Default::default(),
+            },
+            Arc::new(None),
+            None,
+        );
+        let mut event_seq = seq.clone();
+
+        let append = tokio::spawn(async move {
+            seq.append_parts(
+                vec![
+                    SeqAppendPart::Text("before".to_string()),
+                    SeqAppendPart::Tokens(vec![1, 2]),
+                    SeqAppendPart::Text("after".to_string()),
+                ],
+                AppendOpts {
+                    role: Some("user".to_string()),
+                },
+            )
+            .await
+        });
+
+        let MSRequest::SeqCommand { cid, seq_id, data } = request_rx.recv().await.unwrap() else {
+            panic!("expected sequence command");
+        };
+        let SeqCommand::AppendParts(request) = data else {
+            panic!("expected append-parts command");
+        };
+        assert_eq!(seq_id, "seq-1");
+        assert_eq!(request.role.as_deref(), Some("user"));
+        assert!(matches!(
+            &request.parts[..],
+            [
+                SeqAppendPart::Text(before),
+                SeqAppendPart::Tokens(tokens),
+                SeqAppendPart::Text(after),
+            ] if before == "before" && tokens == &[1, 2] && after == "after"
+        ));
+        assert!(!append.is_finished());
+
+        event_seq
+            .on_event(&MSEvent::SeqAppendFinish {
+                seq_id: "seq-1".to_string(),
+                cid,
+            })
+            .await;
+        append.await.unwrap().unwrap();
     }
 
     struct CapturingRequestSink(mpsc::UnboundedSender<MSRequest>);

@@ -27,6 +27,7 @@ pub enum MSRequest {
 pub enum SeqCommand {
     Close(SeqCloseReq),
     Append(SeqAppendReq),
+    AppendParts(SeqAppendPartsReq),
     Gen(SeqGenReq),
     Embed(SeqEmbedReq),
     ToolReturn(SeqToolReturnReq),
@@ -248,7 +249,30 @@ pub struct SeqAppendReq {
     #[serde(default)]
     pub echo: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Switches roles when needed; repeating the current role continues it.
     pub role: Option<String>,
+}
+
+/// Appends ordered text, token, and media parts as one sequence prefill operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeqAppendPartsReq {
+    pub parts: Vec<SeqAppendPart>,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub echo: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Starts a new role block unconditionally; `None` continues the current block.
+    pub role: Option<String>,
+}
+
+/// One ordered part in a sequence append-parts request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeqAppendPart {
+    Text(String),
+    Tokens(Vec<u32>),
+    Media(SeqAppendMedia),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,8 +422,9 @@ pub struct SeqToolCall {
 #[cfg(test)]
 mod tests {
     use super::{
-        EmbeddingContentPart, EmbeddingInput, MSEvent, SeqAppendMedia, SeqAppendReq, SeqCommand,
-        SeqEmbedReq, SeqToolCall, SeqToolReturnReq, ToolResult,
+        EmbeddingContentPart, EmbeddingInput, MSEvent, SeqAppendMedia, SeqAppendPart,
+        SeqAppendPartsReq, SeqAppendReq, SeqCommand, SeqEmbedReq, SeqToolCall, SeqToolReturnReq,
+        ToolResult,
     };
     use serde_json::{json, Value};
 
@@ -554,6 +579,43 @@ mod tests {
 
         assert_eq!(media.blob.as_deref(), Some("aW1hZ2U="));
         assert_eq!(media.detail.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn append_parts_command_preserves_text_media_text_order() {
+        let cmd = SeqCommand::AppendParts(SeqAppendPartsReq {
+            parts: vec![
+                SeqAppendPart::Text("before".to_string()),
+                SeqAppendPart::Media(SeqAppendMedia {
+                    uri: Some("https://example.com/cat.png".to_string()),
+                    blob: None,
+                    hash: Some("b3abc".to_string()),
+                    mime_type: Some("image/png".to_string()),
+                    detail: Some("auto".to_string()),
+                }),
+                SeqAppendPart::Text("after".to_string()),
+            ],
+            hidden: false,
+            echo: false,
+            role: Some("user".to_string()),
+        });
+
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""command":"append_parts""#));
+
+        let parsed: SeqCommand = serde_json::from_str(&json).unwrap();
+        let SeqCommand::AppendParts(parsed) = parsed else {
+            panic!("expected append-parts command");
+        };
+        assert_eq!(parsed.role.as_deref(), Some("user"));
+        assert!(matches!(
+            &parsed.parts[..],
+            [
+                SeqAppendPart::Text(before),
+                SeqAppendPart::Media(_),
+                SeqAppendPart::Text(after)
+            ] if before == "before" && after == "after"
+        ));
     }
 
     #[test]
