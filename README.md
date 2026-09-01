@@ -61,9 +61,16 @@ reply = seq.gen_text()
 print(reply)
 
 # ...or streaming generate
-stream = seq.gen_text_stream(role="assistant",max_tokens=200)
+stream = seq.gen_text_stream(
+    role="assistant",
+    max_tokens=200,
+    reasoning_level="medium",
+)
 for chunk in stream:
-    print(chunk, end="", flush=True)
+    if chunk.reasoning:
+        print(f"[thinking]{chunk.text}", end="", flush=True)
+    else:
+        print(chunk, end="", flush=True)
 
 seq.close()
 ```
@@ -106,6 +113,36 @@ seq = client.open("qwen/qwen3-8b", tools=tools)
 ```
 
 Each handler receives the JSON payload for the tool call and should return a string that is forwarded back to the model sequence.
+
+### Reasoning fields
+
+Generation requests can carry reasoning controls:
+
+```json
+{
+  "command": "gen",
+  "max_tokens": 256,
+  "reasoning": {
+    "level": "medium",
+    "max_tokens": 128
+  }
+}
+```
+
+Generated text events can carry an explicit `reasoning` flag - use this to determine when reasoning output is beingh generated:
+
+```json
+{
+  "event": "seq_text",
+  "seq_id": "seq_1",
+  "cid": "gen_1",
+  "text": "thinking step",
+  "hidden": false,
+  "reasoning": true,
+  "num_input_tokens": 12,
+  "num_output_tokens": 34
+}
+```
 
 ## License
 

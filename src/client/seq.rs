@@ -106,10 +106,11 @@ impl Seq {
                 cid,
                 text,
                 hidden,
+                reasoning,
                 tokens,
                 ..
             } => {
-                self.on_text(cid, text.clone(), *hidden, tokens.clone())
+                self.on_text(cid, text.clone(), *hidden, *reasoning, tokens.clone())
                     .await
             }
             MSEvent::SeqClosed { cid, .. } => {
@@ -154,12 +155,20 @@ impl Seq {
         self.event_tx = None;
     }
 
-    async fn on_text(&mut self, cid: &str, text: String, hidden: bool, tokens: Option<Vec<u32>>) {
+    async fn on_text(
+        &mut self,
+        cid: &str,
+        text: String,
+        hidden: bool,
+        reasoning: bool,
+        tokens: Option<Vec<u32>>,
+    ) {
         let mut gen_streams = self.gen_streams.lock().await;
         if let Some(sender) = gen_streams.get_mut(cid) {
             let chunk = GenChunk {
                 text,
                 hidden,
+                reasoning,
                 tokens,
             };
 
@@ -621,6 +630,8 @@ impl GenStream {
 pub struct GenChunk {
     pub text: String,
     pub hidden: bool,
+    #[serde(default)]
+    pub reasoning: bool,
     pub tokens: Option<Vec<u32>>,
 }
 
@@ -643,7 +654,7 @@ mod tests {
     use crate::ToolResult;
     use anyhow::Result;
     use async_trait::async_trait;
-    use futures::Sink;
+    use futures::{Sink, StreamExt};
     use std::task::{Context, Poll};
     use tokio::time::{timeout, Duration};
 
@@ -759,6 +770,49 @@ mod tests {
             panic!("expected tool return request");
         };
         assert_eq!(request.gen_opts.max_emitted_tools, Some(1));
+    }
+
+    #[tokio::test]
+    async fn seq_text_event_preserves_reasoning_on_stream_chunks() {
+        let mut seq = Seq::new(
+            "seq-1".to_string(),
+            "model".to_string(),
+            test_socket(),
+            Arc::new(None),
+            None,
+        );
+
+        let mut stream = seq.generate::<SeqGenReq>(None).await.unwrap();
+        seq.on_event(&MSEvent::SeqText {
+            seq_id: "seq-1".to_string(),
+            cid: stream_cid(&seq).await,
+            text: "thinking".to_string(),
+            hidden: false,
+            reasoning: true,
+            num_input_tokens: 1,
+            num_output_tokens: 1,
+            tokens: Some(vec![42]),
+        })
+        .await;
+
+        let chunk = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(chunk.reasoning);
+        assert_eq!(chunk.text, "thinking");
+        assert_eq!(chunk.tokens, Some(vec![42]));
+    }
+
+    async fn stream_cid(seq: &Seq) -> String {
+        seq.gen_streams
+            .lock()
+            .await
+            .keys()
+            .next()
+            .cloned()
+            .expect("active generation stream cid")
     }
 
     struct CapturingRequestSink(mpsc::UnboundedSender<MSRequest>);
