@@ -15,6 +15,7 @@ use crate::client::{
     AppendOpts, GenChunk, GenOpts, GenStream, ModelSocket, ModelSocketError, OpenOpts, Seq,
 };
 use crate::tools::Toolbox;
+use crate::ReasoningConfig;
 
 fn map_err(err: ModelSocketError) -> PyErr {
     PyRuntimeError::new_err(err.to_string())
@@ -151,7 +152,7 @@ impl PyBlockingSeq {
     }
 
     #[pyo3(
-        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None)",
+        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None, reasoning_level=None, reasoning_max_tokens=None)",
         signature = (
             role=None,
             stop_strings=None,
@@ -164,7 +165,9 @@ impl PyBlockingSeq {
             repeat_penalty=None,
             seed=None,
             frequency_penalty=None,
-            presence_penalty=None
+            presence_penalty=None,
+            reasoning_level=None,
+            reasoning_max_tokens=None
         )
     )]
     pub fn gen_text(
@@ -181,25 +184,29 @@ impl PyBlockingSeq {
         seed: Option<u64>,
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
+        reasoning_level: Option<&str>,
+        reasoning_max_tokens: Option<u32>,
     ) -> PyResult<String> {
         let seq = self.inner.clone();
+        let opts = build_gen_opts(
+            role,
+            stop_strings,
+            max_length,
+            max_tokens,
+            hidden,
+            temperature,
+            top_p,
+            top_k,
+            repeat_penalty,
+            seed,
+            frequency_penalty,
+            presence_penalty,
+            reasoning_level,
+            reasoning_max_tokens,
+        );
 
         Python::attach(|py| {
             block_on(py, async move {
-                let opts = build_gen_opts(
-                    role,
-                    stop_strings,
-                    max_length,
-                    max_tokens,
-                    hidden,
-                    temperature,
-                    top_p,
-                    top_k,
-                    repeat_penalty,
-                    seed,
-                    frequency_penalty,
-                    presence_penalty,
-                );
                 let stream = seq.generate(Some(opts)).await?;
                 stream.text().await
             })
@@ -207,7 +214,7 @@ impl PyBlockingSeq {
     }
 
     #[pyo3(
-        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None)",
+        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None, reasoning_level=None, reasoning_max_tokens=None)",
         signature = (
             role=None,
             stop_strings=None,
@@ -220,7 +227,9 @@ impl PyBlockingSeq {
             repeat_penalty=None,
             seed=None,
             frequency_penalty=None,
-            presence_penalty=None
+            presence_penalty=None,
+            reasoning_level=None,
+            reasoning_max_tokens=None
         )
     )]
     pub fn gen_text_and_tokens(
@@ -237,25 +246,29 @@ impl PyBlockingSeq {
         seed: Option<u64>,
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
+        reasoning_level: Option<&str>,
+        reasoning_max_tokens: Option<u32>,
     ) -> PyResult<(String, Vec<u32>)> {
         let seq = self.inner.clone();
+        let opts = build_gen_opts(
+            role,
+            stop_strings,
+            max_length,
+            max_tokens,
+            hidden,
+            temperature,
+            top_p,
+            top_k,
+            repeat_penalty,
+            seed,
+            frequency_penalty,
+            presence_penalty,
+            reasoning_level,
+            reasoning_max_tokens,
+        );
 
         Python::attach(|py| {
             block_on(py, async move {
-                let opts = build_gen_opts(
-                    role,
-                    stop_strings,
-                    max_length,
-                    max_tokens,
-                    hidden,
-                    temperature,
-                    top_p,
-                    top_k,
-                    repeat_penalty,
-                    seed,
-                    frequency_penalty,
-                    presence_penalty,
-                );
                 let stream = seq.generate(Some(opts)).await?;
                 stream.text_and_tokens().await
             })
@@ -263,7 +276,7 @@ impl PyBlockingSeq {
     }
 
     #[pyo3(
-        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None)",
+        text_signature = "($self, /, *, role=None, stop_strings=None, max_length=None, max_tokens=None, hidden=None, temperature=None, top_p=None, top_k=None, repeat_penalty=None, seed=None, frequency_penalty=None, presence_penalty=None, reasoning_level=None, reasoning_max_tokens=None)",
         signature = (
             role=None,
             stop_strings=None,
@@ -276,7 +289,9 @@ impl PyBlockingSeq {
             repeat_penalty=None,
             seed=None,
             frequency_penalty=None,
-            presence_penalty=None
+            presence_penalty=None,
+            reasoning_level=None,
+            reasoning_max_tokens=None
         )
     )]
     pub fn gen_text_stream(
@@ -294,26 +309,28 @@ impl PyBlockingSeq {
         seed: Option<u64>,
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
+        reasoning_level: Option<&str>,
+        reasoning_max_tokens: Option<u32>,
     ) -> PyResult<Py<PyBlockingGenStream>> {
         let seq = self.inner.clone();
+        let opts = build_gen_opts(
+            role,
+            stop_strings,
+            max_length,
+            max_tokens,
+            hidden,
+            temperature,
+            top_p,
+            top_k,
+            repeat_penalty,
+            seed,
+            frequency_penalty,
+            presence_penalty,
+            reasoning_level,
+            reasoning_max_tokens,
+        );
 
-        let stream = block_on(py, async move {
-            let opts = build_gen_opts(
-                role,
-                stop_strings,
-                max_length,
-                max_tokens,
-                hidden,
-                temperature,
-                top_p,
-                top_k,
-                repeat_penalty,
-                seed,
-                frequency_penalty,
-                presence_penalty,
-            );
-            seq.generate(Some(opts)).await
-        })?;
+        let stream = block_on(py, async move { seq.generate(Some(opts)).await })?;
 
         Py::new(py, PyBlockingGenStream::new(stream))
     }
@@ -388,6 +405,8 @@ pub struct PyGenEvent {
     #[pyo3(get)]
     hidden: bool,
     #[pyo3(get)]
+    reasoning: bool,
+    #[pyo3(get)]
     tokens: Option<Vec<u32>>,
 }
 
@@ -396,6 +415,7 @@ impl From<GenChunk> for PyGenEvent {
         Self {
             text: chunk.text,
             hidden: chunk.hidden,
+            reasoning: chunk.reasoning,
             tokens: chunk.tokens,
         }
     }
@@ -405,9 +425,10 @@ impl From<GenChunk> for PyGenEvent {
 impl PyGenEvent {
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!(
-            "GenEvent(text={:?}, hidden={}, tokens={})",
+            "GenEvent(text={:?}, hidden={}, reasoning={}, tokens={})",
             self.text,
             self.hidden,
+            self.reasoning,
             match &self.tokens {
                 Some(tokens) => format!("{:?}", tokens),
                 None => "None".to_string(),
@@ -548,6 +569,8 @@ fn build_gen_opts(
     seed: Option<u64>,
     frequency_penalty: Option<f32>,
     presence_penalty: Option<f32>,
+    reasoning_level: Option<&str>,
+    reasoning_max_tokens: Option<u32>,
 ) -> GenOpts {
     let mut opts = GenOpts::default();
     opts.role = role.map(|r| r.to_string());
@@ -562,7 +585,22 @@ fn build_gen_opts(
     opts.seed = seed;
     opts.frequency_penalty = frequency_penalty;
     opts.presence_penalty = presence_penalty;
+    opts.reasoning = build_reasoning_config(reasoning_level, reasoning_max_tokens);
     opts
+}
+
+fn build_reasoning_config(
+    reasoning_level: Option<&str>,
+    reasoning_max_tokens: Option<u32>,
+) -> Option<ReasoningConfig> {
+    let level = reasoning_level.filter(|level| !level.is_empty());
+    match (level, reasoning_max_tokens) {
+        (None, None) => None,
+        (level, max_tokens) => Some(ReasoningConfig {
+            level: level.unwrap_or("default").to_string(),
+            max_tokens,
+        }),
+    }
 }
 
 #[pymodule]

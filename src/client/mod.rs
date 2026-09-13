@@ -352,6 +352,7 @@ pub struct GenOpts {
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
     pub max_emitted_tools: Option<u32>,
+    pub reasoning: Option<crate::ReasoningConfig>,
 }
 
 impl GenOpts {
@@ -395,6 +396,7 @@ impl Into<SeqGenReq> for GenOpts {
             frequency_penalty: self.frequency_penalty,
             presence_penalty: self.presence_penalty,
             max_emitted_tools: self.max_emitted_tools,
+            reasoning: self.reasoning,
             ..Default::default()
         }
     }

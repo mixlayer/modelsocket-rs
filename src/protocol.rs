@@ -78,6 +78,8 @@ pub enum MSEvent {
         cid: String,
         text: String,
         hidden: bool,
+        #[serde(default)]
+        reasoning: bool,
         num_input_tokens: u32,
         num_output_tokens: u32,
         tokens: Option<Vec<u32>>,
@@ -337,6 +339,18 @@ pub struct SeqGenReq {
     pub presence_penalty: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_emitted_tools: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
+}
+
+/// Reasoning controls for one generation leg.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningConfig {
+    /// Requested reasoning level, interpreted and normalized by the serving model gateway.
+    pub level: String,
+    /// Optional maximum reasoning tokens for this generation leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,8 +412,9 @@ pub struct SeqToolCall {
 #[cfg(test)]
 mod tests {
     use super::{
-        EmbeddingContentPart, EmbeddingInput, MSEvent, SeqAppendMedia, SeqAppendReq, SeqCommand,
-        SeqEmbedReq, SeqToolCall, SeqToolReturnReq, ToolResult,
+        EmbeddingContentPart, EmbeddingInput, MSEvent, ReasoningConfig, SeqAppendMedia,
+        SeqAppendReq, SeqCommand, SeqEmbedReq, SeqGenReq, SeqToolCall, SeqToolReturnReq,
+        ToolResult,
     };
     use serde_json::{json, Value};
 
@@ -456,6 +471,96 @@ mod tests {
         assert_eq!(
             serde_json::to_value(decoded).unwrap(),
             serde_json::to_value(event).unwrap()
+        );
+    }
+
+    #[test]
+    fn seq_text_defaults_reasoning_to_false_for_legacy_json() {
+        let event: MSEvent = serde_json::from_value(json!({
+            "event": "seq_text",
+            "seq_id": "seq_1",
+            "cid": "gen_1",
+            "text": "hello",
+            "hidden": false,
+            "num_input_tokens": 1,
+            "num_output_tokens": 2,
+            "tokens": [10, 11],
+        }))
+        .unwrap();
+
+        let MSEvent::SeqText { reasoning, .. } = event else {
+            panic!("expected seq_text event");
+        };
+        assert!(!reasoning);
+    }
+
+    #[test]
+    fn seq_text_round_trips_explicit_reasoning_flag() {
+        let event = MSEvent::SeqText {
+            seq_id: "seq_1".to_string(),
+            cid: "gen_1".to_string(),
+            text: "thinking".to_string(),
+            hidden: false,
+            reasoning: true,
+            num_input_tokens: 1,
+            num_output_tokens: 2,
+            tokens: Some(vec![10, 11]),
+        };
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["reasoning"], Value::Bool(true));
+
+        let decoded: MSEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(event).unwrap()
+        );
+    }
+
+    #[test]
+    fn gen_request_omits_reasoning_when_absent() {
+        let request = SeqGenReq::default();
+        let json = serde_json::to_value(request).unwrap();
+        assert!(json.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn gen_request_round_trips_reasoning_config() {
+        let request = SeqGenReq {
+            max_tokens: Some(256),
+            reasoning: Some(ReasoningConfig {
+                level: "medium".to_string(),
+                max_tokens: Some(128),
+            }),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json,
+            json!({
+                "hidden": false,
+                "max_tokens": 256,
+                "reasoning": {
+                    "level": "medium",
+                    "max_tokens": 128
+                }
+            })
+        );
+
+        let decoded: SeqGenReq = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.reasoning, request.reasoning);
+    }
+
+    #[test]
+    fn reasoning_config_preserves_opaque_level() {
+        let decoded: ReasoningConfig =
+            serde_json::from_value(json!({ "level": "model-defined" })).unwrap();
+        assert_eq!(decoded.level, "model-defined");
+        assert_eq!(decoded.max_tokens, None);
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            json!({ "level": "model-defined" })
         );
     }
 
