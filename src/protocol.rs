@@ -129,6 +129,10 @@ pub enum MSEvent {
         output_tokens: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_tokens: Option<u32>,
+        /// Nonempty replay attempts started during this sequence's lifetime.
+        /// Defaults to zero for servers predating recomputation metrics.
+        #[serde(default)]
+        recompute_count: u64,
         duration_ms: u64,
         error: Option<String>,
     },
@@ -419,6 +423,30 @@ mod tests {
         ToolResult,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn seq_closed_recompute_count_is_backward_compatible_and_preserves_u64() {
+        for count in [None, Some(0), Some(u64::MAX)] {
+            let mut wire = json!({
+                "event": "seq_closed", "seq_id": "s", "cid": "close",
+                "input_tokens": 12, "cached_input_tokens": 4,
+                "output_tokens": 3, "duration_ms": 25, "error": null
+            });
+            if let Some(count) = count {
+                wire["recompute_count"] = json!(count);
+            }
+            let event: MSEvent = serde_json::from_value(wire).unwrap();
+            assert!(
+                matches!(&event, MSEvent::SeqClosed { recompute_count, .. } if *recompute_count == count.unwrap_or(0))
+            );
+            let encoded = serde_json::to_value(&event).unwrap();
+            assert_eq!(encoded["recompute_count"], json!(count.unwrap_or(0)));
+            assert_eq!(encoded["event"], "seq_closed");
+            assert_eq!(encoded["input_tokens"], 12);
+            assert_eq!(encoded["cached_input_tokens"], 4);
+            assert_eq!(encoded["output_tokens"], 3);
+        }
+    }
 
     fn round_trip_embed(value: Value) -> SeqEmbedReq {
         let cmd: SeqCommand = serde_json::from_value(value.clone()).unwrap();
