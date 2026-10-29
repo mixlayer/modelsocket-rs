@@ -10,12 +10,12 @@ use pyo3::prelude::*;
 use pyo3::types::{PyModule, PyType};
 use tokio::runtime::{Builder, Runtime};
 
+use crate::ReasoningConfig;
 use crate::client::{
-    tools::{SimpleToolbox, Tool, ToolDefinition, ToolParameters},
     AppendOpts, GenChunk, GenOpts, GenStream, ModelSocket, ModelSocketError, OpenOpts, Seq,
+    tools::{SimpleToolbox, Tool, ToolDefinition, ToolParameters},
 };
 use crate::tools::Toolbox;
-use crate::ReasoningConfig;
 
 fn map_err(err: ModelSocketError) -> PyErr {
     PyRuntimeError::new_err(err.to_string())

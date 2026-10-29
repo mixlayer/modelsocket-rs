@@ -418,7 +418,7 @@ mod tests {
         SeqAppendReq, SeqCommand, SeqEmbedReq, SeqGenReq, SeqToolCall, SeqToolReturnReq,
         ToolResult,
     };
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn round_trip_embed(value: Value) -> SeqEmbedReq {
         let cmd: SeqCommand = serde_json::from_value(value.clone()).unwrap();
@@ -697,7 +697,10 @@ mod tests {
         let EmbeddingInput::Content(parts) = &req.inputs[0] else {
             panic!("expected content input");
         };
-        let [EmbeddingContentPart::Text(text), EmbeddingContentPart::Media(media)] = &parts[..]
+        let [
+            EmbeddingContentPart::Text(text),
+            EmbeddingContentPart::Media(media),
+        ] = &parts[..]
         else {
             panic!("expected ordered text and media parts");
         };

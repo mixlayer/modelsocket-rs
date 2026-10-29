@@ -3,9 +3,9 @@ use std::{future::Future, pin::Pin};
 use anyhow::{Context, Result};
 use clap::Parser;
 use modelsocket::{
+    OpenOpts,
     client::{AppendOpts, GenOpts, ModelSocket},
     tools::{SimpleToolbox, Tool, ToolDefinition, Toolbox},
-    OpenOpts,
 };
 use serde_json::json;
 

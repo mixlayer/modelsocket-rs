@@ -1,5 +1,5 @@
-use crate::protocol::{MSEvent, MSRequest};
 use crate::ModelSocketError;
+use crate::protocol::{MSEvent, MSRequest};
 use futures::{Sink, Stream};
 
 pub mod ws;

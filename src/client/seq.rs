@@ -1,10 +1,10 @@
 use crate::{
+    SeqToolCall, SeqToolReturnReq,
     protocol::{
         EmbeddingInput, MSEvent, MSRequest, SeqAppendMedia, SeqAppendReq, SeqCloseReq, SeqCommand,
         SeqEmbedReq, SeqForkReq, SeqGenReq,
     },
     tools::Toolbox,
-    SeqToolCall, SeqToolReturnReq,
 };
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use std::{
     sync::{Arc, Weak},
     task::{Context, Poll},
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
@@ -687,12 +687,12 @@ pub struct EmbeddingResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::tests::test_connection;
     use crate::ToolResult;
+    use crate::client::tests::test_connection;
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::StreamExt;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     #[derive(Debug)]
     struct TestToolbox;

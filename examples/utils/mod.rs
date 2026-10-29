@@ -1,7 +1,7 @@
 use anyhow::Result;
 use futures::StreamExt;
 use modelsocket::GenStream;
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 
 pub async fn print_stream(mut stream: GenStream, hidden: bool, colors: bool) -> Result<()> {
     use colorize::AnsiColor;

@@ -16,8 +16,8 @@ use std::{
     sync::Arc,
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, Mutex, RwLock};
-use tokio_tungstenite::tungstenite::{protocol::Message, Error as WsError};
+use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio_tungstenite::tungstenite::{Error as WsError, protocol::Message};
 use tracing::{debug, error};
 use uuid::Uuid;
 
@@ -460,7 +460,7 @@ pub struct OpenOpts {
 mod tests {
     use super::*;
     use std::task::{Context, Poll};
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     struct ChannelTransport {
         requests: tokio::sync::mpsc::UnboundedSender<MSRequest>,
@@ -580,10 +580,12 @@ mod tests {
         requests: &mut mpsc::UnboundedReceiver<MSRequest>,
         events: &mpsc::UnboundedSender<Result<MSEvent, ModelSocketError>>,
     ) {
-        assert!(timeout(Duration::from_secs(1), requests.recv())
-            .await
-            .expect("last client handle must release the request sink without SeqClosed")
-            .is_none());
+        assert!(
+            timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("last client handle must release the request sink without SeqClosed")
+                .is_none()
+        );
         timeout(Duration::from_secs(1), events.closed())
             .await
             .expect("last client handle must stop the receive task");
@@ -751,10 +753,12 @@ mod tests {
                 .unwrap(),
             Some(Ok(MSEvent::SeqClosed { .. }))
         ));
-        assert!(timeout(Duration::from_secs(1), receiver.recv())
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
         drop(seq);
         drop(socket);
         assert_connection_dropped(&mut requests, &events).await;

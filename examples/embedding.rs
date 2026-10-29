@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use modelsocket::{
-    client::{EmbedOpts, ModelSocket},
     EmbeddingInput,
+    client::{EmbedOpts, ModelSocket},
 };
 
 #[derive(Parser, Debug)]
