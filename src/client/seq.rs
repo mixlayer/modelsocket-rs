@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Weak},
     task::{Context, Poll},
 };
 use tokio::sync::{mpsc, Mutex};
@@ -20,34 +20,38 @@ use uuid::Uuid;
 
 use crate::{AppendOpts, ModelSocket, ModelSocketError};
 
+/// A sequence handle that keeps its ModelSocket connection alive.
 #[derive(Clone)]
 pub struct Seq {
-    /// id for this seq
-    seq_id: String,
-
-    /// model this seq is associated with
-    model: String,
-
-    /// modelsocket this seq is associated with
     socket: ModelSocket,
+    pub(super) state: Arc<SeqState>,
+}
+
+/// Per-seq state shared between `Seq` handles and the socket's seq table.
+///
+/// Holds only a weak reference to the connection so the seq table never keeps it alive.
+pub(super) struct SeqState {
+    seq_id: String,
+    model: String,
+    socket: Weak<super::Connection>,
 
     /// open commands waiting for a response and their return channels
-    cmds: Arc<Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, ModelSocketError>>>>>,
+    cmds: Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, ModelSocketError>>>>,
 
     /// open gen streams waiting for a response and their return channels
-    gen_streams: Arc<Mutex<HashMap<String, mpsc::Sender<Result<GenChunk, ModelSocketError>>>>>,
+    gen_streams: Mutex<HashMap<String, mpsc::Sender<Result<GenChunk, ModelSocketError>>>>,
 
     /// options for the active generation leg, reused by automatic tool returns
-    active_gen_opts: Arc<Mutex<SeqGenReq>>,
+    active_gen_opts: Mutex<SeqGenReq>,
 
     /// open embedding commands waiting for a complete batch response
-    embed_cmds: Arc<Mutex<HashMap<String, EmbedCommandState>>>,
+    embed_cmds: Mutex<HashMap<String, EmbedCommandState>>,
 
     /// tools active on this seq
     toolbox: Arc<Option<Mutex<Box<dyn Toolbox>>>>,
 
     // channel for forwarding model events to the client
-    pub(crate) event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
+    event_tx: Mutex<Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>>,
 }
 
 impl Seq {
@@ -58,28 +62,60 @@ impl Seq {
         toolbox: Arc<Option<Mutex<Box<dyn Toolbox>>>>,
         event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
     ) -> Self {
-        Self {
+        let state = SeqState::new(
             seq_id,
             model,
-            socket,
-            cmds: Arc::new(Mutex::new(HashMap::new())),
-            gen_streams: Arc::new(Mutex::new(HashMap::new())),
-            active_gen_opts: Arc::new(Mutex::new(SeqGenReq::default())),
-            embed_cmds: Arc::new(Mutex::new(HashMap::new())),
-            event_tx,
+            Arc::downgrade(&socket.inner),
             toolbox,
-        }
+            event_tx,
+        );
+        Self { socket, state }
     }
 
     pub fn id(&self) -> &str {
-        &self.seq_id
+        &self.state.seq_id
+    }
+}
+
+impl SeqState {
+    fn new(
+        seq_id: String,
+        model: String,
+        socket: Weak<super::Connection>,
+        toolbox: Arc<Option<Mutex<Box<dyn Toolbox>>>>,
+        event_tx: Option<mpsc::Sender<Result<MSEvent, ModelSocketError>>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            seq_id,
+            model,
+            socket,
+            cmds: Default::default(),
+            gen_streams: Default::default(),
+            active_gen_opts: Default::default(),
+            embed_cmds: Default::default(),
+            event_tx: Mutex::new(event_tx),
+            toolbox,
+        })
     }
 
-    pub async fn on_event(&mut self, event: &MSEvent) {
-        if let Some(tx) = &self.event_tx {
+    /// Creates the state for a child seq forked from this one.
+    pub(super) fn fork_child(&self, child_seq_id: &str) -> Arc<Self> {
+        Self::new(
+            child_seq_id.to_string(),
+            self.model.clone(),
+            self.socket.clone(),
+            self.toolbox.clone(),
+            None,
+        )
+    }
+
+    pub(super) async fn on_event(&self, event: &MSEvent) {
+        // clone the sender so the lock isn't held while waiting on a slow consumer
+        let event_tx = self.event_tx.lock().await.clone();
+        if let Some(tx) = event_tx {
             if let Err(_e) = tx.send(Ok(event.clone())).await {
                 debug!("seq event sink closed");
-                self.event_tx = None;
+                *self.event_tx.lock().await = None;
             }
         }
 
@@ -144,7 +180,7 @@ impl Seq {
     }
 
     /// handle when the server has closed the seq
-    async fn on_close_event(&mut self, cid: &Option<String>) {
+    async fn on_close_event(&self, cid: &Option<String>) {
         if let Some(cid) = cid {
             if let Some(sender) = self.cmds.lock().await.remove(cid) {
                 let _ = sender.send(Ok(serde_json::Value::Null)).await;
@@ -152,11 +188,11 @@ impl Seq {
         }
 
         self.fail_cmds_with_close_error().await;
-        self.event_tx = None;
+        *self.event_tx.lock().await = None;
     }
 
     async fn on_text(
-        &mut self,
+        &self,
         cid: &str,
         text: String,
         hidden: bool,
@@ -179,7 +215,7 @@ impl Seq {
         }
     }
 
-    async fn on_gen_finished(&mut self, cid: &str) {
+    async fn on_gen_finished(&self, cid: &str) {
         if let Some(sender) = self.cmds.lock().await.remove(cid) {
             let _ = sender.send(Ok(serde_json::Value::Null)).await;
         }
@@ -188,13 +224,7 @@ impl Seq {
         }
     }
 
-    async fn on_embedding(
-        &mut self,
-        cid: &str,
-        index: u32,
-        embedding: Vec<f32>,
-        input_tokens: u32,
-    ) {
+    async fn on_embedding(&self, cid: &str, index: u32, embedding: Vec<f32>, input_tokens: u32) {
         let mut embed_cmds = self.embed_cmds.lock().await;
         let Some(state) = embed_cmds.get_mut(cid) else {
             warn!("received embedding for unknown cid: {}", cid);
@@ -216,7 +246,7 @@ impl Seq {
         state.input_tokens[index] = input_tokens;
     }
 
-    async fn on_embed_finished(&mut self, cid: &str, prompt_tokens: u32) {
+    async fn on_embed_finished(&self, cid: &str, prompt_tokens: u32) {
         let Some(state) = self.embed_cmds.lock().await.remove(cid) else {
             warn!("received embed finish for unknown cid: {}", cid);
             return;
@@ -247,14 +277,14 @@ impl Seq {
             .await;
     }
 
-    async fn on_append_finished(&mut self, cid: &str) {
+    async fn on_append_finished(&self, cid: &str) {
         if let Some(sender) = self.cmds.lock().await.remove(cid) {
             let _ = sender.send(Ok(serde_json::Value::Null)).await;
         }
     }
 
     async fn on_command_error(
-        &mut self,
+        &self,
         cid: &str,
         message: &str,
         code: &Option<String>,
@@ -280,7 +310,7 @@ impl Seq {
     }
 
     async fn on_seq_error(
-        &mut self,
+        &self,
         message: &str,
         code: &Option<String>,
         details: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -304,27 +334,15 @@ impl Seq {
         }
     }
 
-    async fn on_fork_finished(&mut self, cid: &str, child_seq_id: &str) {
+    async fn on_fork_finished(&self, cid: &str, child_seq_id: &str) {
+        // the socket event handler has already registered the child seq
         if let Some(sender) = self.cmds.lock().await.remove(cid) {
-            let child_seq = Seq::new(
-                child_seq_id.to_string(),
-                self.model.clone(),
-                self.socket.clone(),
-                self.toolbox.clone(),
-                None,
-            );
-            self.socket
-                .seqs
-                .lock()
-                .await
-                .insert(child_seq_id.to_string(), child_seq.clone());
-
             let child_seq_json = serde_json::to_value(child_seq_id).unwrap();
             let _ = sender.send(Ok(child_seq_json)).await;
         }
     }
 
-    async fn on_tool_call(&mut self, cid: &str, tool_calls: &Vec<SeqToolCall>) {
+    async fn on_tool_call(&self, cid: &str, tool_calls: &Vec<SeqToolCall>) {
         let Some(toolbox) = self.toolbox.as_ref() else {
             debug!(
                 seq_id = self.seq_id,
@@ -335,6 +353,11 @@ impl Seq {
         };
 
         let results = toolbox.lock().await.call_tools(tool_calls).await;
+
+        let Some(socket) = self.socket.upgrade().map(|inner| ModelSocket { inner }) else {
+            debug!(seq_id = self.seq_id, "connection dropped during tool call");
+            return;
+        };
 
         match results {
             Ok(Some(results)) => {
@@ -347,20 +370,58 @@ impl Seq {
                     }),
                 };
 
-                if let Err(err) = self.socket.send_request(tool_return_cmd).await {
+                if let Err(err) = socket.send_request(tool_return_cmd).await {
                     error!("failed to send tool return response: {}", err);
                 }
             }
             Ok(None) => {} // toolbox returned None, skip tool return command
             Err(e) => {
                 error!("failed to call tools: {}", e);
-                if let Err(err) = self.close().await {
+                if let Err(err) = self.close(&socket).await {
                     error!("failed to close seq after tool call error: {}", err);
                 }
             }
         }
     }
 
+    async fn close(&self, socket: &ModelSocket) -> Result<(), ModelSocketError> {
+        let cid = Uuid::new_v4().to_string();
+
+        // if the client has requested a close and there are outstanding
+        // commands or streams, send an error to them
+        self.fail_cmds_with_close_error().await;
+
+        // fire and forget a close command
+        socket
+            .send_request(MSRequest::SeqCommand {
+                cid,
+                seq_id: self.seq_id.clone(),
+                data: SeqCommand::Close(SeqCloseReq {}),
+            })
+            .await
+    }
+
+    /// sends an error to any outstanding commands or streams on this seq
+    async fn fail_cmds_with_close_error(&self) {
+        let mut cmds = self.cmds.lock().await;
+        // send an error to any outstanding commands on this seqs
+        for (_cid, tx) in cmds.drain() {
+            let _ = tx.send(Err(ModelSocketError::SeqClosed)).await;
+        }
+
+        let mut gen_streams = self.gen_streams.lock().await;
+        for (_cid, tx) in gen_streams.drain() {
+            let _ = tx.send(Err(ModelSocketError::SeqClosed)).await;
+        }
+
+        let mut embed_cmds = self.embed_cmds.lock().await;
+        for (_cid, state) in embed_cmds.drain() {
+            let _ = state.sender.send(Err(ModelSocketError::SeqClosed)).await;
+        }
+    }
+}
+
+impl Seq {
     /// A low-level method for sending raw commands over the ModelSocket connection.
     /// You probably don't need this, use the higher-level methods like `append`, `generate`, `fork`, and `close`.
     pub async fn send_cmd<S: AsRef<str>>(
@@ -369,13 +430,13 @@ impl Seq {
         cmd: SeqCommand,
     ) -> Result<(), ModelSocketError> {
         if let SeqCommand::Gen(gen_opts) = &cmd {
-            *self.active_gen_opts.lock().await = gen_opts.clone();
+            *self.state.active_gen_opts.lock().await = gen_opts.clone();
         }
 
         self.socket
             .send_request(MSRequest::SeqCommand {
                 cid: cid.as_ref().to_string(),
-                seq_id: self.seq_id.clone(),
+                seq_id: self.state.seq_id.clone(),
                 data: cmd,
             })
             .await?;
@@ -390,12 +451,12 @@ impl Seq {
     ) -> Result<(), ModelSocketError> {
         let cid = Uuid::new_v4().to_string();
         let (tx, mut rx) = mpsc::channel(1);
-        self.cmds.lock().await.insert(cid.clone(), tx);
+        self.state.cmds.lock().await.insert(cid.clone(), tx);
 
         self.socket
             .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
-                seq_id: self.seq_id.clone(),
+                seq_id: self.state.seq_id.clone(),
                 data: SeqCommand::Append(SeqAppendReq {
                     text: text.as_ref().to_string(),
                     role: opts.role,
@@ -418,12 +479,12 @@ impl Seq {
     ) -> Result<(), ModelSocketError> {
         let cid = Uuid::new_v4().to_string();
         let (tx, mut rx) = mpsc::channel(1);
-        self.cmds.lock().await.insert(cid.clone(), tx);
+        self.state.cmds.lock().await.insert(cid.clone(), tx);
 
         self.socket
             .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
-                seq_id: self.seq_id.clone(),
+                seq_id: self.state.seq_id.clone(),
                 data: SeqCommand::Append(SeqAppendReq {
                     media: Some(media),
                     role: opts.role,
@@ -445,18 +506,22 @@ impl Seq {
     ) -> Result<GenStream, ModelSocketError> {
         let cid = Uuid::new_v4().to_string();
         let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
-        self.cmds.lock().await.insert(cid.clone(), cmd_tx);
+        self.state.cmds.lock().await.insert(cid.clone(), cmd_tx);
 
         let (stream_tx, stream_rx) = mpsc::channel(100);
-        self.gen_streams.lock().await.insert(cid.clone(), stream_tx);
+        self.state
+            .gen_streams
+            .lock()
+            .await
+            .insert(cid.clone(), stream_tx);
 
         let gen_opts = opts.map(Into::into).unwrap_or_default();
-        *self.active_gen_opts.lock().await = gen_opts.clone();
+        *self.state.active_gen_opts.lock().await = gen_opts.clone();
 
         self.socket
             .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
-                seq_id: self.seq_id.clone(),
+                seq_id: self.state.seq_id.clone(),
                 data: SeqCommand::Gen(gen_opts),
             })
             .await?;
@@ -466,18 +531,21 @@ impl Seq {
             let _ = cmd_rx.recv().await;
         });
 
-        Ok(GenStream { stream: stream_rx })
+        Ok(GenStream {
+            stream: stream_rx,
+            _socket: self.socket.clone(),
+        })
     }
 
     pub async fn fork(&self) -> Result<Seq, ModelSocketError> {
         let cid = Uuid::new_v4().to_string();
         let (tx, mut rx) = mpsc::channel(1);
-        self.cmds.lock().await.insert(cid.clone(), tx);
+        self.state.cmds.lock().await.insert(cid.clone(), tx);
 
         self.socket
             .send_request(MSRequest::SeqCommand {
                 cid: cid.clone(),
-                seq_id: self.seq_id.clone(),
+                seq_id: self.state.seq_id.clone(),
                 data: SeqCommand::Fork(SeqForkReq {}),
             })
             .await?;
@@ -489,16 +557,16 @@ impl Seq {
 
         let child_seq_id = child_seq_id_val.as_str().unwrap().to_string();
 
-        let child_seq = self
+        let state = self
             .socket
-            .seqs
-            .lock()
+            .registered_seq(&child_seq_id)
             .await
-            .get(&child_seq_id)
-            .ok_or_else(|| ModelSocketError::State("child seq not found".into()))?
-            .clone();
+            .ok_or_else(|| ModelSocketError::State("child seq not found".into()))?;
 
-        Ok(child_seq)
+        Ok(Seq {
+            socket: self.socket.clone(),
+            state,
+        })
     }
 
     pub async fn embed(
@@ -510,7 +578,7 @@ impl Seq {
         let (tx, mut rx) = mpsc::channel(1);
         let opts = opts.unwrap_or_default();
 
-        self.embed_cmds.lock().await.insert(
+        self.state.embed_cmds.lock().await.insert(
             cid.clone(),
             EmbedCommandState {
                 embeddings: vec![None; inputs.len()],
@@ -522,7 +590,7 @@ impl Seq {
         self.socket
             .send_request(MSRequest::SeqCommand {
                 cid,
-                seq_id: self.seq_id.clone(),
+                seq_id: self.state.seq_id.clone(),
                 data: SeqCommand::Embed(SeqEmbedReq {
                     inputs,
                     input_type: opts.input_type,
@@ -538,42 +606,8 @@ impl Seq {
         })?
     }
 
-    /// sends an error to any outstanding commands or streams on this seq
-    async fn fail_cmds_with_close_error(&self) {
-        let mut cmds = self.cmds.lock().await;
-        // send an error to any outstanding commands on this seqs
-        for (_cid, tx) in cmds.drain() {
-            let _ = tx.send(Err(ModelSocketError::SeqClosed)).await;
-        }
-
-        let mut gen_streams = self.gen_streams.lock().await;
-        for (_cid, tx) in gen_streams.drain() {
-            let _ = tx.send(Err(ModelSocketError::SeqClosed)).await;
-        }
-
-        let mut embed_cmds = self.embed_cmds.lock().await;
-        for (_cid, state) in embed_cmds.drain() {
-            let _ = state.sender.send(Err(ModelSocketError::SeqClosed)).await;
-        }
-    }
-
     pub async fn close(&self) -> Result<(), ModelSocketError> {
-        let cid = Uuid::new_v4().to_string();
-
-        // if the client has requested a close and there are outstanding
-        // commands or streams, send an error to them
-        self.fail_cmds_with_close_error().await;
-
-        // fire and forget a close command
-        self.socket
-            .send_request(MSRequest::SeqCommand {
-                cid: cid.clone(),
-                seq_id: self.seq_id.clone(),
-                data: SeqCommand::Close(SeqCloseReq {}),
-            })
-            .await?;
-
-        Ok(())
+        self.state.close(&self.socket).await
     }
 }
 
@@ -585,7 +619,9 @@ pub struct EmbedOpts {
     pub truncate: Option<bool>,
 }
 
+/// A generation stream that keeps its connection alive until dropped.
 pub struct GenStream {
+    _socket: ModelSocket,
     stream: mpsc::Receiver<Result<GenChunk, ModelSocketError>>,
 }
 
@@ -651,43 +687,12 @@ pub struct EmbeddingResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::tests::test_connection;
     use crate::ToolResult;
     use anyhow::Result;
     use async_trait::async_trait;
-    use futures::{Sink, StreamExt};
-    use std::task::{Context, Poll};
+    use futures::StreamExt;
     use tokio::time::{timeout, Duration};
-
-    struct RequestSink;
-
-    impl Sink<MSRequest> for RequestSink {
-        type Error = ModelSocketError;
-
-        fn poll_ready(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn start_send(self: Pin<&mut Self>, _item: MSRequest) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        fn poll_flush(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_close(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-    }
 
     #[derive(Debug)]
     struct TestToolbox;
@@ -712,32 +717,13 @@ mod tests {
         }
     }
 
-    fn test_socket() -> ModelSocket {
-        let ws_sink: Pin<Box<dyn Sink<MSRequest, Error = ModelSocketError> + Send>> =
-            Box::pin(RequestSink);
-
-        ModelSocket {
-            ws_sink: Arc::new(Mutex::new(ws_sink)),
-            opening_seqs: Default::default(),
-            seqs: Default::default(),
-            closed_seqs: Default::default(),
-        }
-    }
-
     #[tokio::test]
     async fn automatic_tool_return_preserves_generation_options() {
-        let (request_tx, mut request_rx) = mpsc::unbounded_channel();
-        let ws_sink: Pin<Box<dyn Sink<MSRequest, Error = ModelSocketError> + Send>> =
-            Box::pin(CapturingRequestSink(request_tx));
-        let mut seq = Seq::new(
+        let (socket, mut request_rx, _events) = test_connection();
+        let seq = Seq::new(
             "seq-1".to_string(),
             "model".to_string(),
-            ModelSocket {
-                ws_sink: Arc::new(Mutex::new(ws_sink)),
-                opening_seqs: Default::default(),
-                seqs: Default::default(),
-                closed_seqs: Default::default(),
-            },
+            socket,
             Arc::new(Some(Mutex::new(Box::new(TestToolbox)))),
             None,
         );
@@ -752,15 +738,16 @@ mod tests {
         .unwrap();
         let _ = request_rx.recv().await.unwrap();
 
-        seq.on_tool_call(
-            "gen",
-            &vec![SeqToolCall {
-                id: Some("call-1".to_string()),
-                name: "search".to_string(),
-                args: "{}".to_string(),
-            }],
-        )
-        .await;
+        seq.state
+            .on_tool_call(
+                "gen",
+                &vec![SeqToolCall {
+                    id: Some("call-1".to_string()),
+                    name: "search".to_string(),
+                    args: "{}".to_string(),
+                }],
+            )
+            .await;
 
         let MSRequest::SeqCommand {
             data: SeqCommand::ToolReturn(request),
@@ -772,28 +759,85 @@ mod tests {
         assert_eq!(request.gen_opts.max_emitted_tools, Some(1));
     }
 
+    #[derive(Debug)]
+    struct FailingToolbox;
+
+    #[async_trait]
+    impl Toolbox for FailingToolbox {
+        async fn call_tools(&self, _calls: &[SeqToolCall]) -> Result<Option<Vec<ToolResult>>> {
+            Err(anyhow::anyhow!("tool exploded"))
+        }
+
+        fn tool_def_prompt(&self) -> Option<String> {
+            None
+        }
+    }
+
     #[tokio::test]
-    async fn seq_text_event_preserves_reasoning_on_stream_chunks() {
-        let mut seq = Seq::new(
+    async fn failed_tool_call_closes_seq_and_fails_pending_commands() {
+        let (socket, mut request_rx, _events) = test_connection();
+        let seq = Seq::new(
             "seq-1".to_string(),
             "model".to_string(),
-            test_socket(),
+            socket,
+            Arc::new(Some(Mutex::new(Box::new(FailingToolbox)))),
+            None,
+        );
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        seq.state
+            .cmds
+            .lock()
+            .await
+            .insert("gen".to_string(), cmd_tx);
+
+        seq.state
+            .on_tool_call(
+                "gen",
+                &vec![SeqToolCall {
+                    id: Some("call-1".to_string()),
+                    name: "search".to_string(),
+                    args: "{}".to_string(),
+                }],
+            )
+            .await;
+
+        assert!(matches!(
+            cmd_rx.recv().await,
+            Some(Err(ModelSocketError::SeqClosed))
+        ));
+        assert!(matches!(
+            request_rx.recv().await,
+            Some(MSRequest::SeqCommand {
+                data: SeqCommand::Close(_),
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn seq_text_event_preserves_reasoning_on_stream_chunks() {
+        let (socket, _requests, _events) = test_connection();
+        let seq = Seq::new(
+            "seq-1".to_string(),
+            "model".to_string(),
+            socket,
             Arc::new(None),
             None,
         );
 
         let mut stream = seq.generate::<SeqGenReq>(None).await.unwrap();
-        seq.on_event(&MSEvent::SeqText {
-            seq_id: "seq-1".to_string(),
-            cid: stream_cid(&seq).await,
-            text: "thinking".to_string(),
-            hidden: false,
-            reasoning: true,
-            num_input_tokens: 1,
-            num_output_tokens: 1,
-            tokens: Some(vec![42]),
-        })
-        .await;
+        seq.state
+            .on_event(&MSEvent::SeqText {
+                seq_id: "seq-1".to_string(),
+                cid: stream_cid(&seq).await,
+                text: "thinking".to_string(),
+                hidden: false,
+                reasoning: true,
+                num_input_tokens: 1,
+                num_output_tokens: 1,
+                tokens: Some(vec![42]),
+            })
+            .await;
 
         let chunk = timeout(Duration::from_secs(1), stream.next())
             .await
@@ -806,46 +850,14 @@ mod tests {
     }
 
     async fn stream_cid(seq: &Seq) -> String {
-        seq.gen_streams
+        seq.state
+            .gen_streams
             .lock()
             .await
             .keys()
             .next()
             .cloned()
             .expect("active generation stream cid")
-    }
-
-    struct CapturingRequestSink(mpsc::UnboundedSender<MSRequest>);
-
-    impl Sink<MSRequest> for CapturingRequestSink {
-        type Error = ModelSocketError;
-
-        fn poll_ready(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn start_send(self: Pin<&mut Self>, item: MSRequest) -> Result<(), Self::Error> {
-            self.0
-                .send(item)
-                .map_err(|_| ModelSocketError::State("request receiver closed".to_string()))
-        }
-
-        fn poll_flush(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_close(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
     }
 
     fn assert_remote_error<T>(result: Result<T, ModelSocketError>, message: &str) {
@@ -862,25 +874,31 @@ mod tests {
 
     #[tokio::test]
     async fn seq_level_error_fails_all_pending_commands_and_streams() {
-        let mut seq = Seq::new(
+        let (socket, _requests, _events) = test_connection();
+        let seq = Seq::new(
             "seq-1".to_string(),
             "model".to_string(),
-            test_socket(),
+            socket,
             Arc::new(None),
             None,
         );
 
         let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
-        seq.cmds.lock().await.insert("cmd-1".to_string(), cmd_tx);
+        seq.state
+            .cmds
+            .lock()
+            .await
+            .insert("cmd-1".to_string(), cmd_tx);
 
         let (gen_tx, mut gen_rx) = mpsc::channel(1);
-        seq.gen_streams
+        seq.state
+            .gen_streams
             .lock()
             .await
             .insert("gen-1".to_string(), gen_tx);
 
         let (embed_tx, mut embed_rx) = mpsc::channel(1);
-        seq.embed_cmds.lock().await.insert(
+        seq.state.embed_cmds.lock().await.insert(
             "embed-1".to_string(),
             EmbedCommandState {
                 embeddings: vec![None],
@@ -890,14 +908,15 @@ mod tests {
         );
 
         let message = "seq failed";
-        seq.on_event(&MSEvent::Error {
-            cid: None,
-            seq_id: Some("seq-1".to_string()),
-            message: message.to_string(),
-            code: None,
-            details: None,
-        })
-        .await;
+        seq.state
+            .on_event(&MSEvent::Error {
+                cid: None,
+                seq_id: Some("seq-1".to_string()),
+                message: message.to_string(),
+                code: None,
+                details: None,
+            })
+            .await;
 
         assert_remote_error(
             timeout(Duration::from_millis(100), cmd_rx.recv())
@@ -921,22 +940,23 @@ mod tests {
             message,
         );
 
-        assert!(seq.cmds.lock().await.is_empty());
-        assert!(seq.gen_streams.lock().await.is_empty());
-        assert!(seq.embed_cmds.lock().await.is_empty());
+        assert!(seq.state.cmds.lock().await.is_empty());
+        assert!(seq.state.gen_streams.lock().await.is_empty());
+        assert!(seq.state.embed_cmds.lock().await.is_empty());
     }
 
     #[tokio::test]
     async fn command_error_preserves_remote_details() {
-        let mut seq = Seq::new(
+        let (socket, _requests, _events) = test_connection();
+        let seq = Seq::new(
             "seq-1".to_string(),
             "model".to_string(),
-            test_socket(),
+            socket,
             Arc::new(None),
             None,
         );
         let (tx, mut rx) = mpsc::channel(1);
-        seq.cmds.lock().await.insert("gen".to_string(), tx);
+        seq.state.cmds.lock().await.insert("gen".to_string(), tx);
         let details = serde_json::json!({
             "rpm_limit": 60,
             "rpm_remaining": 0,
@@ -948,14 +968,15 @@ mod tests {
         .unwrap()
         .clone();
 
-        seq.on_event(&MSEvent::Error {
-            cid: Some("gen".into()),
-            seq_id: Some("seq-1".into()),
-            message: "Rate limit exceeded".into(),
-            code: Some("rate_limit_exceeded".into()),
-            details: Some(details.clone()),
-        })
-        .await;
+        seq.state
+            .on_event(&MSEvent::Error {
+                cid: Some("gen".into()),
+                seq_id: Some("seq-1".into()),
+                message: "Rate limit exceeded".into(),
+                code: Some("rate_limit_exceeded".into()),
+                details: Some(details.clone()),
+            })
+            .await;
 
         match rx.recv().await.unwrap() {
             Err(ModelSocketError::Remote {

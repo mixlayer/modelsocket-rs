@@ -8,6 +8,7 @@ use crate::{
 };
 use futures::{Sink, Stream};
 use futures_util::{SinkExt, StreamExt};
+use seq::SeqState;
 pub use seq::{EmbedOpts, EmbeddingResult, GenChunk, GenStream, Seq};
 use std::{
     collections::{HashMap, HashSet},
@@ -66,25 +67,35 @@ struct ModelSocketEventHandler {
     opening_seqs: Arc<Mutex<HashMap<String, mpsc::Sender<Result<String, ModelSocketError>>>>>,
 
     /// Seqs being managed by this socket
-    seqs: Arc<Mutex<HashMap<String, Seq>>>,
+    seqs: Arc<Mutex<HashMap<String, Arc<SeqState>>>>,
 
     /// Records a set of tombstoned seqs that have been closed
     closed_seqs: Arc<RwLock<HashSet<String>>>,
 }
 
+/// A connection kept alive by caller-owned sockets, sequences, and generation streams.
 #[derive(Clone)]
 pub struct ModelSocket {
+    inner: Arc<Connection>,
+}
+
+/// Connection state shared by every `ModelSocket` handle.
+struct Connection {
     /// Channel for sending requests to the model server
-    ws_sink: Arc<Mutex<Pin<Box<dyn Sink<MSRequest, Error = ModelSocketError> + Send>>>>,
+    ws_sink: Mutex<Pin<Box<dyn Sink<MSRequest, Error = ModelSocketError> + Send>>>,
 
-    /// Seqs that are being opened by this socket
-    opening_seqs: Arc<Mutex<HashMap<String, mpsc::Sender<Result<String, ModelSocketError>>>>>,
+    /// Seq tables, shared with the receive task
+    handler: ModelSocketEventHandler,
 
-    /// Seqs being managed by this socket
-    seqs: Arc<Mutex<HashMap<String, Seq>>>,
+    receive_task: tokio::task::AbortHandle,
+}
 
-    /// Records a set of tombstoned seqs that have been closed
-    closed_seqs: Arc<RwLock<HashSet<String>>>,
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // The receive task only holds the seq tables, never the connection, so it
+        // would otherwise run until the server hangs up.
+        self.receive_task.abort();
+    }
 }
 
 impl ModelSocket {
@@ -98,20 +109,21 @@ impl ModelSocket {
 
         let (ws_sink, ws_stream) = transport.split();
 
-        let socket = Self {
-            ws_sink: Arc::new(Mutex::new(Box::pin(ws_sink))),
-            opening_seqs: Arc::new(Mutex::new(HashMap::new())),
-            seqs: Arc::new(Mutex::new(HashMap::new())),
+        let handler = ModelSocketEventHandler {
+            opening_seqs: Default::default(),
+            seqs: Default::default(),
             closed_seqs: Default::default(),
         };
 
-        let event_handler = socket.event_handler();
+        let receive_task = tokio::spawn(handler.clone().event_recv_loop(ws_stream)).abort_handle();
 
-        tokio::spawn(async move {
-            event_handler.event_recv_loop(ws_stream).await;
-        });
-
-        Ok(socket)
+        Ok(Self {
+            inner: Arc::new(Connection {
+                ws_sink: Mutex::new(Box::pin(ws_sink)),
+                handler,
+                receive_task,
+            }),
+        })
     }
 
     pub async fn connect(url: &str, api_key: Option<&str>) -> Result<Self, ModelSocketError> {
@@ -119,21 +131,8 @@ impl ModelSocket {
         Self::new(ws_transport)
     }
 
-    fn clone_components(&self) -> Self {
-        Self {
-            ws_sink: self.ws_sink.clone(),
-            opening_seqs: self.opening_seqs.clone(),
-            seqs: self.seqs.clone(),
-            closed_seqs: self.closed_seqs.clone(),
-        }
-    }
-
-    fn event_handler(&self) -> ModelSocketEventHandler {
-        ModelSocketEventHandler {
-            opening_seqs: self.opening_seqs.clone(),
-            seqs: self.seqs.clone(),
-            closed_seqs: self.closed_seqs.clone(),
-        }
+    async fn registered_seq(&self, seq_id: &str) -> Option<Arc<SeqState>> {
+        self.inner.handler.seqs.lock().await.get(seq_id).cloned()
     }
 }
 
@@ -171,6 +170,15 @@ impl ModelSocketEventHandler {
                     self.forward_to_seq(&event).await;
                 }
             }
+            MSEvent::SeqForkFinish {
+                seq_id,
+                child_seq_id,
+                ..
+            } => {
+                // register the child before the parent's fork() call resumes
+                self.on_seq_forked(seq_id, child_seq_id).await;
+                self.forward_to_seq(&event).await
+            }
             MSEvent::SeqClosed { seq_id, .. } => {
                 // delegate to seq first to allow it to clean up
                 self.forward_to_seq(&event).await;
@@ -197,14 +205,14 @@ impl ModelSocketEventHandler {
             }
         };
 
-        let mut seqs = self.seqs.lock().await;
-
         if self.is_seq_closed(seq_id).await {
             debug!(seq = seq_id, "skipping event for closed seq");
             return;
         }
 
-        if let Some(seq) = seqs.get_mut(seq_id) {
+        // release the table lock first so a slow event sink can't block open() or fork()
+        let seq = self.seqs.lock().await.get(seq_id).cloned();
+        if let Some(seq) = seq {
             seq.on_event(event).await;
         } else {
             error!(seq_id, "state error: unknown seq_id");
@@ -224,6 +232,14 @@ impl ModelSocketEventHandler {
             if let Some(sender) = self.opening_seqs.lock().await.remove(cid) {
                 let _ = sender.send(Err(remote_error(message, code, details))).await;
             }
+        }
+    }
+
+    async fn on_seq_forked(&self, parent_seq_id: &str, child_seq_id: &str) {
+        let mut seqs = self.seqs.lock().await;
+        if let Some(parent) = seqs.get(parent_seq_id) {
+            let child = parent.fork_child(child_seq_id);
+            seqs.insert(child_seq_id.to_owned(), child);
         }
     }
 
@@ -270,7 +286,7 @@ impl ModelSocket {
         let (tx, mut rx) = mpsc::channel(1);
 
         {
-            let mut opening_seqs = self.opening_seqs.lock().await;
+            let mut opening_seqs = self.inner.handler.opening_seqs.lock().await;
             opening_seqs.insert(cid.clone(), tx);
         }
 
@@ -301,18 +317,17 @@ impl ModelSocket {
         let seq = Seq::new(
             seq_id.clone(),
             model.to_string(),
-            self.clone_components(),
+            self.clone(),
             toolbox,
-            None,
+            opts.event_sink,
         );
 
-        {
-            let mut seqs = self.seqs.lock().await;
-            let mut seq_event_handler = seq.clone();
-            seq_event_handler.event_tx = opts.event_sink;
-
-            seqs.insert(seq_id, seq_event_handler);
-        }
+        self.inner
+            .handler
+            .seqs
+            .lock()
+            .await
+            .insert(seq_id, seq.state.clone());
 
         // append tool definition prompts to the sequence
         if let Some(tool_def_prompt) = tool_def_prompt {
@@ -324,7 +339,7 @@ impl ModelSocket {
 
     async fn send_request(&self, req: MSRequest) -> Result<(), ModelSocketError> {
         debug!("-> {:?}", req);
-        let mut sink = self.ws_sink.lock().await;
+        let mut sink = self.inner.ws_sink.lock().await;
         sink.send(req).await?;
         Ok(())
     }
@@ -521,6 +536,261 @@ mod tests {
         assert!(closed.is_none());
 
         drop(event_tx);
+    }
+
+    pub(super) fn test_connection() -> (
+        ModelSocket,
+        mpsc::UnboundedReceiver<MSRequest>,
+        mpsc::UnboundedSender<Result<MSEvent, ModelSocketError>>,
+    ) {
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let socket = ModelSocket::new(ChannelTransport {
+            requests: request_tx,
+            events: event_rx,
+        })
+        .unwrap();
+        (socket, request_rx, event_tx)
+    }
+
+    async fn open_test_sequence(
+        socket: &ModelSocket,
+        requests: &mut mpsc::UnboundedReceiver<MSRequest>,
+        events: &mpsc::UnboundedSender<Result<MSEvent, ModelSocketError>>,
+        opts: Option<OpenOpts>,
+    ) -> Seq {
+        let mut open = Box::pin(socket.open("model", opts));
+        assert!(futures::poll!(&mut open).is_pending());
+        let MSRequest::SeqOpen { cid, .. } = requests.recv().await.unwrap() else {
+            panic!("expected sequence open");
+        };
+        events
+            .send(Ok(MSEvent::SeqOpened {
+                seq_id: "seq-1".into(),
+                cid,
+            }))
+            .unwrap();
+        timeout(Duration::from_secs(1), open)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn assert_connection_dropped(
+        requests: &mut mpsc::UnboundedReceiver<MSRequest>,
+        events: &mpsc::UnboundedSender<Result<MSEvent, ModelSocketError>>,
+    ) {
+        assert!(timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("last client handle must release the request sink without SeqClosed")
+            .is_none());
+        timeout(Duration::from_secs(1), events.closed())
+            .await
+            .expect("last client handle must stop the receive task");
+    }
+
+    #[tokio::test]
+    async fn dropping_open_sequence_and_all_socket_clones_releases_transport() {
+        let (socket, mut requests, events) = test_connection();
+        let seq = open_test_sequence(&socket, &mut requests, &events, None).await;
+        let socket_clone = socket.clone();
+        let seq_clone = seq.clone();
+        drop(socket);
+        drop(seq);
+        drop(socket_clone);
+
+        // The final external sequence still owns a usable connection.
+        seq_clone
+            .send_cmd("gen", crate::SeqCommand::Gen(Default::default()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            requests.recv().await,
+            Some(MSRequest::SeqCommand { .. })
+        ));
+        drop(seq_clone);
+        assert_connection_dropped(&mut requests, &events).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_pending_open_releases_transport() {
+        let (socket, mut requests, events) = test_connection();
+        let mut open = Box::pin(async move { socket.open("model", None).await });
+        assert!(futures::poll!(&mut open).is_pending());
+        assert!(matches!(
+            requests.recv().await,
+            Some(MSRequest::SeqOpen { .. })
+        ));
+        drop(open);
+        assert_connection_dropped(&mut requests, &events).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_pending_prefill_releases_transport_without_close_ack() {
+        let (socket, mut requests, events) = test_connection();
+        let seq = open_test_sequence(&socket, &mut requests, &events, None).await;
+        drop(socket);
+        let mut prefill = Box::pin(async move { seq.append("prompt", AppendOpts::user()).await });
+        assert!(futures::poll!(&mut prefill).is_pending());
+        assert!(matches!(
+            requests.recv().await,
+            Some(MSRequest::SeqCommand {
+                data: crate::SeqCommand::Append(_),
+                ..
+            })
+        ));
+        drop(prefill);
+        assert_connection_dropped(&mut requests, &events).await;
+    }
+
+    #[tokio::test]
+    async fn generation_stream_keeps_connection_alive_until_dropped() {
+        let (socket, mut requests, events) = test_connection();
+        let seq = open_test_sequence(&socket, &mut requests, &events, None).await;
+        let mut stream = seq.generate::<SeqGenReq>(None).await.unwrap();
+        let Some(MSRequest::SeqCommand { cid, .. }) = requests.recv().await else {
+            panic!("expected generation command");
+        };
+        drop(seq);
+        drop(socket);
+        events
+            .send(Ok(MSEvent::SeqText {
+                seq_id: "seq-1".into(),
+                cid,
+                text: "hello".into(),
+                hidden: false,
+                reasoning: false,
+                num_input_tokens: 1,
+                num_output_tokens: 1,
+                tokens: None,
+            }))
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .text,
+            "hello"
+        );
+        drop(stream);
+        assert_connection_dropped(&mut requests, &events).await;
+    }
+
+    #[tokio::test]
+    async fn dropping_client_stops_receive_task_with_full_event_sink() {
+        let (socket, mut requests, events) = test_connection();
+        let (sink, mut receiver) = mpsc::channel(1);
+        let event = MSEvent::SeqAppendFinish {
+            seq_id: "seq-1".into(),
+            cid: "append".into(),
+        };
+        sink.send(Ok(event.clone())).await.unwrap();
+        let seq = open_test_sequence(
+            &socket,
+            &mut requests,
+            &events,
+            Some(OpenOpts {
+                event_sink: Some(sink),
+                ..Default::default()
+            }),
+        )
+        .await;
+        events.send(Ok(event)).unwrap();
+        tokio::task::yield_now().await;
+        drop(seq);
+        drop(socket);
+        assert_connection_dropped(&mut requests, &events).await;
+        assert!(receiver.recv().await.is_some());
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn close_acknowledgement_removes_sequence_event_handler() {
+        let (socket, mut requests, events) = test_connection();
+        let (sink, mut receiver) = mpsc::channel(1);
+        let seq = open_test_sequence(
+            &socket,
+            &mut requests,
+            &events,
+            Some(OpenOpts {
+                event_sink: Some(sink),
+                ..Default::default()
+            }),
+        )
+        .await;
+        seq.close().await.unwrap();
+        let Some(MSRequest::SeqCommand {
+            cid,
+            data: crate::SeqCommand::Close(_),
+            ..
+        }) = requests.recv().await
+        else {
+            panic!("expected close request");
+        };
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        events
+            .send(Ok(MSEvent::SeqClosed {
+                seq_id: seq.id().into(),
+                cid: Some(cid),
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+                reasoning_tokens: None,
+                duration_ms: 0,
+                error: None,
+            }))
+            .unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap(),
+            Some(Ok(MSEvent::SeqClosed { .. }))
+        ));
+        assert!(timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .is_none());
+        drop(seq);
+        drop(socket);
+        assert_connection_dropped(&mut requests, &events).await;
+    }
+
+    #[tokio::test]
+    async fn forked_sequence_keeps_connection_alive_and_releases_transport_on_drop() {
+        let (socket, mut requests, events) = test_connection();
+        let parent = open_test_sequence(&socket, &mut requests, &events, None).await;
+        let mut fork = Box::pin(parent.fork());
+        assert!(futures::poll!(&mut fork).is_pending());
+        let Some(MSRequest::SeqCommand { cid, .. }) = requests.recv().await else {
+            panic!("expected fork command");
+        };
+        events
+            .send(Ok(MSEvent::SeqForkFinish {
+                seq_id: parent.id().into(),
+                cid,
+                child_seq_id: "child".into(),
+            }))
+            .unwrap();
+        let child = timeout(Duration::from_secs(1), fork)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(parent);
+        drop(socket);
+        child
+            .send_cmd("gen", crate::SeqCommand::Gen(Default::default()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(requests.recv().await, Some(MSRequest::SeqCommand { seq_id, .. }) if seq_id == "child")
+        );
+        drop(child);
+        assert_connection_dropped(&mut requests, &events).await;
     }
 
     #[tokio::test]
