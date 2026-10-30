@@ -1,17 +1,16 @@
 use crate::protocol::MSRequest;
-use futures::{stream::SplitStream, Sink, Stream};
-use futures_util::{stream::SplitSink, StreamExt};
+use futures::{Sink, Stream, stream::SplitStream};
+use futures_util::{StreamExt, stream::SplitSink};
 use http::{Request, Uri};
 use std::pin::Pin;
 
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async,
+    MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{self, protocol::Message},
-    MaybeTlsStream, WebSocketStream,
 };
 
-use crate::{transport::MSTransport, ModelSocketError};
+use crate::{ModelSocketError, transport::MSTransport};
 
 pub struct WebSocketTransport {
     ws_sink: WsSink,
